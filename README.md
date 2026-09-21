@@ -176,4 +176,4 @@ A：兼容 OpenAI Chat Completions 接口，包括单轮/多轮、多模态（�
 
 ## License
 
-MIT
+Apache License 2.0 — 详见仓库根目录 `LICENSE` 文件。
