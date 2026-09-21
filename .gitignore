@@ -1,0 +1,9 @@
+# 运行时生成的 SQLite 用量数据库（含调用记录，不入库）
+usage.db
+usage.db-journal
+usage.db-wal
+usage.db-shm
+
+# Python 缓存
+__pycache__/
+*.pyc

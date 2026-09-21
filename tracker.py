@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+单文件 token 用量统计（纯标准库，无第三方依赖）
+
+功能:
+  - 反向代理: 监听 0.0.0.0:11435 -> llama-server(默认 11434)
+  - 用量落库: SQLite (token-tracker/usage.db)
+  - Web 页面: 打开 http://host:11435 按日期区间查询记录与统计
+
+客户端: base_url 改为 11435，并加请求头 X-Task-Id 或用请求体 user 字段区分任务
+"""
+import json
+import os
+import sys
+import sqlite3
+import threading
+import atexit
+import signal
+import socket
+import datetime
+import select
+import urllib.request
+import urllib.error
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BACKEND = "http://localhost:11434"
+LISTEN = ("0.0.0.0", 11435)
+DB_PATH = os.path.join(HERE, "usage.db")
+
+# 等价 API 折算价（每 1M token，单位：人民币 ¥，参考 DeepSeek 最新模型，可自行修改）
+# 时段定义（北京时间）：高峰 = 工作日 9:00–12:00、14:00–18:00；
+#                      闲时 = 其余时间，价格为高峰的一半（已实现，见 _current_pricing）。
+# 默认采用 DeepSeek-Flash (V4.1-Flash，最新默认模型) 高峰价
+PEAK_PRICING = {
+    "input_per_M": 2.00,    # 未命中缓存输入  ¥2.00 / 1M
+    "cached_per_M": 0.04,   # 命中缓存输入    ¥0.04 / 1M
+    "output_per_M": 8.00,   # 输出            ¥8.00 / 1M
+}
+OFFPEAK_PRICING = {
+    "input_per_M": 1.00,    # 闲时（高峰价一半）¥1.00 / 1M
+    "cached_per_M": 0.02,   # 闲时 ¥0.02 / 1M
+    "output_per_M": 4.00,   # 闲时 ¥4.00 / 1M
+}
+EXCHANGE_RATE_RMB_PER_USD = 7.00  # 汇率：1 USD = 7.00 RMB，用于在前端折算美元显示
+
+# 兼容历史字段/前端：暴露一份“参考单价”（取高峰价）对象，前端用于展示单位价格与汇率
+PRICING = dict(PEAK_PRICING)
+PRICING["rmb_per_usd"] = EXCHANGE_RATE_RMB_PER_USD
+
+# 备选 DeepSeek-V4-Pro 高峰价（推理更强、不支持图像理解）：
+#   PEAK_PRICING = {"input_per_M": 9.00, "cached_per_M": 0.30, "output_per_M": 27.00}
+#   OFFPEAK_PRICING = {"input_per_M": 4.50, "cached_per_M": 0.15, "output_per_M": 13.50}
+
+# ----------------------------- 分时计价 -----------------------------
+def _beijing_now():
+    # 无第三方依赖地取得北京时间（中国不实行夏令时，固定 UTC+8 即可）
+    return datetime.datetime.now(datetime.timezone.utc).astimezone(
+        datetime.timezone(datetime.timedelta(hours=8)))
+
+def _is_peak(t):
+    # 工作日(周一~周五)且落在 9:00–12:00 或 14:00–18:00 视为高峰时段
+    if t.weekday() >= 5:  # 5=周六, 6=周日
+        return False
+    minutes = t.hour * 60 + t.minute
+    return (9 * 60 <= minutes < 12 * 60) or (14 * 60 <= minutes < 18 * 60)
+
+def _current_pricing():
+    """按当前北京时间返回高峰/闲时单价表。"""
+    return PEAK_PRICING if _is_peak(_beijing_now()) else OFFPEAK_PRICING
+
+# ----------------------------- 数据库 -----------------------------
+_lock = threading.Lock()
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+atexit.register(conn.close)  # 进程退出时释放 SQLite 句柄
+
+# 进程级资源追踪：用于终止时立即释放所有在途的后端连接
+server = None
+_active_lock = threading.Lock()
+_active_responses = set()  # 当前正在转发、与 llama-server 的连接集合
+_active_clients = set()    # 当前在途的客户端（上游调用方）连接集合，便于终止时统一断开
+conn.execute("""CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT,
+    day TEXT,
+    task TEXT,
+    prompt_tokens INTEGER,
+    cached_tokens INTEGER,
+    uncached_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    cost_rmb REAL,
+    has_image INTEGER DEFAULT 0
+)""")
+conn.commit()
+
+# 字段配置：入库的输入/输出文本最大长度，0 = 不限制（存全文）
+MAX_INPUT = 0
+MAX_OUTPUT = 0
+
+# 兼容已有库：补齐新列
+_cols = [r[1] for r in conn.execute("PRAGMA table_info(usage)")]
+if "input_text" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN input_text TEXT")
+if "output_text" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN output_text TEXT")
+if "reasoning_text" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN reasoning_text TEXT")
+if "input_raw" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN input_raw TEXT")
+if "has_image" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN has_image INTEGER DEFAULT 0")
+# 历史库：cost_usd 重命名为 cost_rmb（语义修正——该列实际存的是人民币，非美元）
+cost_col = "cost_rmb"
+if "cost_usd" in _cols and "cost_rmb" not in _cols:
+    try:
+        conn.execute("ALTER TABLE usage RENAME COLUMN cost_usd TO cost_rmb")
+    except sqlite3.OperationalError:
+        # 极老版本 SQLite 不支持 RENAME COLUMN：保留原列名，值仍为人民帀
+        cost_col = "cost_usd"
+conn.commit()
+
+
+def compute_cost(u, pricing):
+    return (u["uncached_tokens"] / 1_000_000 * pricing["input_per_M"]
+            + u["cached_tokens"] / 1_000_000 * pricing["cached_per_M"]
+            + u["completion_tokens"] / 1_000_000 * pricing["output_per_M"])
+
+
+def save_usage(task_id, u, input_text="", output_text="", reasoning_text="",
+               input_raw="", has_image=0):
+    now = datetime.datetime.now()
+    pricing = _current_pricing()  # 按当前北京时间取高峰/闲时单价
+    with _lock:
+        conn.execute(
+            "INSERT INTO usage (ts, day, task, prompt_tokens, cached_tokens, "
+            "uncached_tokens, completion_tokens, total_tokens, {cc}, "
+            "input_text, output_text, reasoning_text, input_raw, has_image) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)".format(cc=cost_col),
+            (now.isoformat(timespec="seconds"), now.strftime("%Y-%m-%d"), task_id,
+             u["prompt_tokens"], u["cached_tokens"], u["uncached_tokens"],
+             u["completion_tokens"], u["total_tokens"], round(compute_cost(u, pricing), 6),
+             input_text, output_text, reasoning_text, input_raw, int(has_image)))
+        conn.commit()
+
+
+def _where(from_d, to_d, task=None):
+    clauses, params = [], []
+    if from_d:
+        clauses.append("day >= ?"); params.append(from_d)
+    if to_d:
+        clauses.append("day <= ?"); params.append(to_d)
+    if task:
+        clauses.append("task = ?"); params.append(task)
+    return ((" WHERE " + " AND ".join(clauses)) if clauses else ""), params
+
+
+def query_stats(from_d, to_d, task=None):
+    where, params = _where(from_d, to_d, task)
+    with _lock:
+        rows = conn.execute(
+            f"SELECT task, COUNT(*), SUM(prompt_tokens), SUM(cached_tokens), "
+            f"SUM(uncached_tokens), SUM(completion_tokens), SUM(total_tokens), "
+            f"SUM({cost_col}) FROM usage" + where +
+            " GROUP BY task ORDER BY SUM(total_tokens) DESC", params).fetchall()
+        tot = conn.execute(
+            f"SELECT COUNT(*), SUM(prompt_tokens), SUM(cached_tokens), "
+            f"SUM(uncached_tokens), SUM(completion_tokens), SUM(total_tokens), SUM({cost_col}) "
+            f"FROM usage" + where, params).fetchone()
+    tasks = [{"task": r[0], "calls": r[1], "prompt": r[2] or 0, "cached": r[3] or 0,
+              "uncached": r[4] or 0, "completion": r[5] or 0, "total": r[6] or 0,
+              "cost": round(r[7] or 0, 6)} for r in rows]
+    total = {"calls": tot[0] or 0, "prompt": tot[1] or 0, "cached": tot[2] or 0,
+             "uncached": tot[3] or 0, "completion": tot[4] or 0,
+             "total": tot[5] or 0, "cost": round(tot[6] or 0, 6)}
+    return {"from": from_d, "to": to_d, "total": total, "tasks": tasks, "pricing": PRICING}
+
+
+def query_records(from_d, to_d, task=None):
+    where, params = _where(from_d, to_d, task)
+    with _lock:
+        rows = conn.execute(
+            f"SELECT id, ts, task, prompt_tokens, cached_tokens, uncached_tokens, "
+            f"completion_tokens, total_tokens, {cost_col}, input_text, output_text, "
+            f"reasoning_text, input_raw, has_image FROM usage" + where + " ORDER BY id DESC", params).fetchall()
+    return [{"id": r[0], "ts": r[1], "task": r[2], "prompt": r[3], "cached": r[4],
+             "uncached": r[5], "completion": r[6], "total": r[7],
+             "cost": round(r[8], 6), "input": r[9] or "", "output": r[10] or "",
+             "reasoning": r[11] or "", "raw": r[12] or "", "has_image": r[13] or 0}
+            for r in rows]
+
+
+def delete_records(ids=None, from_d=None, to_d=None, task=None):
+    """批量删除：按 id 列表，或按日期区间(+可选任务)。返回删除条数。"""
+    clauses, params = [], []
+    if ids:
+        ph = ",".join("?" * len(ids))
+        clauses.append(f"id IN ({ph})"); params.extend(ids)
+    else:
+        if from_d:
+            clauses.append("day >= ?"); params.append(from_d)
+        if to_d:
+            clauses.append("day <= ?"); params.append(to_d)
+        if task:
+            clauses.append("task = ?"); params.append(task)
+    if not clauses:
+        return 0
+    where = " WHERE " + " AND ".join(clauses)
+    with _lock:
+        cur = conn.execute("DELETE FROM usage" + where, params)
+        conn.commit()
+        return cur.rowcount
+
+
+# ----------------------------- usage 解析 -----------------------------
+def extract_usage(body):
+    try:
+        text = body.decode("utf-8", "ignore")
+    except Exception:
+        return None
+    if body.lstrip().startswith(b"{"):
+        try:
+            return json.loads(text).get("usage")
+        except Exception:
+            return None
+    usage = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload in ("", "[DONE]"):
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        if obj.get("usage"):
+            usage = obj["usage"]
+    return usage
+
+
+def _msg_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # 多模态 parts
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return ""
+
+
+def extract_input(req):
+    parts = []
+    for m in req.get("messages") or []:
+        role = m.get("role", "?")
+        parts.append(f"[{role}]\n{_msg_text(m.get('content', ''))}")
+    text = "\n\n".join(parts)
+    return text if MAX_INPUT <= 0 else text[:MAX_INPUT]
+
+
+def detect_images(req):
+    """检测 messages 中是否含图片（OpenAI 多模态格式：image_url / image / base64 data:image）。"""
+    for m in req.get("messages") or []:
+        c = m.get("content")
+        if isinstance(c, list):
+            for part in c:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in ("image", "image_url") or part.get("image_url"):
+                    return 1
+                img = part.get("image")
+                if isinstance(img, str) and img.startswith("data:image"):
+                    return 1
+        elif isinstance(c, str) and "data:image" in c:
+            return 1
+    return 0
+
+
+def extract_output_text(body):
+    """从响应体提取生成的文本，返回 (reasoning, content) 两个独立片段。
+
+    同时抓取 thinking/reasoning 内容：
+      非流式 -> message.reasoning_content / message.content
+      流式   -> delta.reasoning_content / delta.content
+    """
+    try:
+        text = body.decode("utf-8", "ignore")
+    except Exception:
+        return "", ""
+    reason, out = [], []
+    if body.lstrip().startswith(b"{"):
+        try:
+            msg = json.loads(text)["choices"][0]["message"]
+            reason.append(msg.get("reasoning_content", "") or "")
+            out.append(_msg_text(msg.get("content", "")))
+        except Exception:
+            return "", ""
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload in ("", "[DONE]"):
+                continue
+            try:
+                obj = json.loads(payload)
+            except Exception:
+                continue
+            try:
+                delta = obj["choices"][0].get("delta", {})
+                if delta.get("reasoning_content"):
+                    reason.append(delta["reasoning_content"])
+                if delta.get("content"):
+                    out.append(delta["content"])
+            except Exception:
+                continue
+    r = "".join(reason)
+    c = "".join(out)
+    return (r if MAX_OUTPUT <= 0 else r[:MAX_OUTPUT],
+            c if MAX_OUTPUT <= 0 else c[:MAX_OUTPUT])
+
+
+def _parse_sse_line(line, usage_holder, reason_parts, content_parts):
+    """增量解析单行 SSE (data: ...)，实时累积 usage / reason / content。
+
+    usage_holder: 长度 1 的列表，用于回写最新的 usage 对象（流式末尾才有完整值）。
+    reason_parts / content_parts: 增量拼接的正文片段列表。
+    原始响应字节不在此保留，转发后即释放。
+    """
+    s = line.strip()
+    if not s.startswith(b"data:"):
+        return
+    payload = s[len(b"data:"):].strip()
+    if not payload or payload == b"[DONE]":
+        return
+    try:
+        obj = json.loads(payload)
+    except Exception:
+        return
+    if obj.get("usage"):
+        usage_holder[0] = obj["usage"]
+    try:
+        delta = obj["choices"][0].get("delta", {})
+        rc = delta.get("reasoning_content")
+        cc = delta.get("content")
+        if rc:
+            reason_parts.append(rc)
+        if cc:
+            content_parts.append(cc)
+    except Exception:
+        pass
+
+
+def norm_usage(usage):
+    if not usage:
+        return None
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    completion = int(usage.get("completion_tokens", 0) or 0)
+    d = usage.get("prompt_tokens_details") or {}
+    cached = int(d.get("cached_tokens") or d.get("cache_read_tokens")
+                 or usage.get("cached_prompt_tokens") or 0)
+    return {
+        "prompt_tokens": prompt,
+        "cached_tokens": cached,
+        "uncached_tokens": max(prompt - cached, 0),
+        "completion_tokens": completion,
+        "total_tokens": int(usage.get("total_tokens", prompt + completion)
+                            or (prompt + completion)),
+    }
+
+
+# ----------------------------- Web 页面（独立文件 web.html） -----------------------------
+WEB_PATH = os.path.join(HERE, "web.html")
+
+def load_html():
+    try:
+        with open(WEB_PATH, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>web.html 未找到，请确认与 tracker.py 同目录</h1>"
+
+
+# ----------------------------- 代理 / 路由 -----------------------------
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # 提升流式(SSE)客户端兼容性；配合 Connection: close 以连接关闭界定消息结束
+
+    def handle(self):
+        # 登记客户端连接：退出时 _request_shutdown 可主动断开上游调用方，
+        # 避免其因代理进程退出而长时间挂起。
+        with _active_lock:
+            _active_clients.add(self.connection)
+        try:
+            super().handle()
+        finally:
+            with _active_lock:
+                _active_clients.discard(self.connection)
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        if p in ("/", "/index.html", "/web.html"):
+            self._send_html(load_html())
+        elif p.startswith("/api/"):
+            self._api(p)
+        else:
+            self._proxy("GET")
+
+    def do_POST(self):
+        p = self.path.split("?")[0]
+        if p == "/api/delete":
+            self._api_delete()
+        elif p.startswith("/v1/"):
+            self._proxy("POST")
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    # ---- Web API ----
+    def _api(self, p):
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        f = qs.get("from", [""])[0] or None
+        t = qs.get("to", [""])[0] or None
+        if p.startswith("/api/stats"):
+            self._send_json(200, query_stats(f, t))
+        elif p.startswith("/api/records"):
+            self._send_json(200, query_records(f, t))
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def _api_delete(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            body = {}
+        ids = body.get("ids")
+        if ids is not None and not isinstance(ids, list):
+            ids = None
+        deleted = delete_records(ids=ids, from_d=body.get("from"), to_d=body.get("to"),
+                                  task=body.get("task"))
+        self._send_json(200, {"deleted": deleted})
+
+    # ---- 反向代理（保留流式）----
+    def _proxy(self, method):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+        task_id = self.headers.get("X-Task-Id", "default")
+        is_chat = self.path.split("?")[0].rstrip("/").endswith("/chat/completions")
+        input_text = ""
+        input_raw = ""
+        has_image = False
+        is_stream = False
+        if is_chat:
+            try:
+                req = json.loads(body) if body else {}
+                if req.get("stream"):
+                    req.setdefault("stream_options", {})["include_usage"] = True
+                    body = json.dumps(req).encode()
+                    is_stream = True
+                if task_id == "default" and req.get("user"):
+                    task_id = str(req["user"])
+                input_text = extract_input(req)
+                if req.get("messages") is not None:
+                    input_raw = json.dumps(req.get("messages"), ensure_ascii=False)
+                has_image = detect_images(req)
+            except Exception:
+                pass
+
+        url = BACKEND + self.path
+        # 注意：body 为空时必须传 None，否则 urllib 会把空 body 当作有体请求（给 GET 附加空体）
+        r = urllib.request.Request(url, data=body if body else None, method=method)
+        for k, v in self.headers.items():
+            if k.lower() in ("host", "content-length"):
+                continue
+            r.add_header(k, v)
+        if body:
+            # 仅当客户端未自带 Content-Type 时默认 application/json，避免覆盖非 JSON 体
+            if "content-type" not in (k.lower() for k in self.headers):
+                r.add_header("Content-Type", "application/json")
+            r.add_header("Content-Length", str(len(body)))
+
+        try:
+            resp = urllib.request.urlopen(r, timeout=1800)
+            status = resp.status
+            resp_headers = resp.headers
+        except urllib.error.HTTPError as e:
+            status = e.code
+            resp_headers = e.headers
+            resp = e
+        except urllib.error.URLError as e:
+            # 后端不可达 / 连接被拒 / DNS 失败等：返回 502，避免客户端拿到空连接
+            self._send_json(502, {"error": "backend_unreachable",
+                                  "detail": str(getattr(e, "reason", "") or e)})
+            return
+        except Exception as e:
+            self._send_json(502, {"error": "proxy_error", "detail": str(e)})
+            return
+
+        with _active_lock:
+            _active_responses.add(resp)  # 登记在途后端连接，便于终止时统一释放
+
+        self.send_response(status)
+        self.send_header("Content-Type", resp_headers.get("Content-Type", "application/json"))
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        client_gone = False
+        client_sock = self.connection  # 客户端 socket，用于主动探测对端是否断开
+        # 流式：逐行增量解析，不缓存整段原始响应（原始字节转发后即丢，内存边转发边释放）；
+        #       仅保留最终 usage 与拼接后的正文文本（体积远小于原始 SSE 字节）。
+        # 非流式：仍需整段缓冲以解析单条 JSON。
+        pending = bytearray()          # 流式：跨 chunk 的不完整 SSE 行
+        reason_parts: list[str] = []   # 流式：增量拼接的 reasoning 片段
+        content_parts: list[str] = []  # 流式：增量拼接的 content 片段
+        usage_holder = [None]          # 流式：最新的 usage 对象（末尾才有完整值）
+        buf = bytearray()              # 非流式：整段缓冲
+        try:
+            while True:
+                # 主动探测客户端是否已断开：不等“下一次 write 抛错”才发现。
+                # 否则在 Windows / OS 发送缓冲等情况下 write 不会立刻报错，代理会
+                # 继续驱动 llama-server 生成，旧会话残留在后端占着 GPU/解码资源，
+                # 导致新会话 token 速度被永久拖慢（即“中断后变慢”的现象）。
+                try:
+                    r, _, _ = select.select([client_sock], [], [], 0)
+                    if r:
+                        client_sock.setblocking(False)
+                        try:
+                            # MSG_PEEK：仅窥探不消费，避免误吞客户端可能发来的数据（如管线请求）
+                            probe = client_sock.recv(1, socket.MSG_PEEK)
+                        finally:
+                            client_sock.setblocking(True)
+                        if probe == b"":  # 对端已发 FIN/关闭 (EOF)
+                            client_gone = True
+                            break
+                except OSError:
+                    client_gone = True
+                    break
+
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                    # 立即 flush：否则写缓冲不刷新，客户端断开时 write 不会立刻抛错，
+                    # 会继续把整个响应读进 buf（长上下文下内存暴涨），且无法及时释放后端资源
+                    self.wfile.flush()
+                except Exception:
+                    # 客户端已断开（异常中断）：立刻停止读取并关闭与后端的连接，
+                    # 否则 llama-server 仍会继续生成 token，占用解码资源，
+                    # 导致后续请求的 token 速度变慢（长上下文尤其明显）
+                    client_gone = True
+                    break
+                if is_stream:
+                    # 增量解析：把新到的字节并入 pending，逐行抽取 usage / 正文，
+                    # 原始字节不保留，处理完即丢弃。
+                    pending.extend(chunk)
+                    while True:
+                        nl = pending.find(b"\n")
+                        if nl < 0:
+                            break
+                        _parse_sse_line(bytes(pending[:nl + 1]), usage_holder,
+                                        reason_parts, content_parts)
+                        del pending[:nl + 1]
+                elif is_chat:
+                    buf.extend(chunk)
+        finally:
+            with _active_lock:
+                _active_responses.discard(resp)  # 从在途集合移除
+            # 始终关闭与后端的连接，及时释放 llama-server 的生成资源
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+        if is_stream:
+            # 处理末尾可能无换行的不完整行（如最后一条 usage / [DONE]）
+            if pending:
+                _parse_sse_line(bytes(pending), usage_holder, reason_parts, content_parts)
+            # 即使客户端中途断开，只要拿到了末尾的 usage 对象，仍计入用量（避免统计被低估）
+            u = norm_usage(usage_holder[0])
+            if u:
+                rt = "".join(reason_parts)
+                ct = "".join(content_parts)
+                out = ct if MAX_OUTPUT <= 0 else ct[:MAX_OUTPUT]
+                rsn = rt if MAX_OUTPUT <= 0 else rt[:MAX_OUTPUT]
+                save_usage(task_id, u, input_text, out or "", rsn, input_raw, has_image)
+            del reason_parts, content_parts, usage_holder, pending
+        elif is_chat:
+            full = bytes(buf)
+            del buf  # 尽快释放大缓冲区
+            # 已完整读到后端响应即记账（无论客户端是否已断开），避免中断请求漏记 token
+            u = norm_usage(extract_usage(full))
+            if u:
+                rt, ct = extract_output_text(full)
+                save_usage(task_id, u, input_text, ct or "", rt, input_raw, has_image)
+            del full
+
+    # ---- 响应工具 ----
+    def _send_html(self, html):
+        data = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_json(self, code, obj):
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format, *args):  # noqa: A002 - 必须与 BaseHTTPRequestHandler 基类签名一致
+        pass
+
+    def handle_error(self, request, client_address):  # 重写基类：静默客户端断连类异常
+        exc = sys.exc_info()[1]
+        # 客户端提前断开（RST / 管道破裂 / 连接中止）属正常，不打 traceback 刷屏
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
+                            BrokenPipeError)):
+            return
+        # 其余异常仅打印一行摘要，避免完整 traceback 刷屏
+        sys.stderr.write(f"[tracker] 请求处理异常 {client_address}: {exc!r}\n")
+
+
+def _request_shutdown(signum, frame):
+    """收到终止信号：立即关闭所有在途后端连接（让 llama-server 停止生成）
+    与上游客户端连接（避免调用方长时间挂起），再停止监听循环，
+    确保 GPU/解码资源与监听端口被及时释放。"""
+    with _active_lock:
+        active = list(_active_responses)
+        clients = list(_active_clients)
+    for r in active:
+        try:
+            r.close()  # 关闭与 llama-server 的连接，中止其继续生成
+        except Exception:
+            pass
+    for c in clients:
+        try:
+            c.close()  # 主动断开上游调用方，使其立即收到连接关闭而非超时
+        except Exception:
+            pass
+    srv = server
+    if srv is not None:
+        try:
+            srv.shutdown()   # 让 serve_forever() 立即返回
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    print(f"token-tracker 启动: http://0.0.0.0:{LISTEN[1]}  ->  {BACKEND}")
+    print(f"SQLite: {DB_PATH}")
+    print(f"浏览器打开 http://127.0.0.1:{LISTEN[1]}/web.html 按日期查询；客户端 base_url 改连 11435 并带 X-Task-Id/user 区分任务。Ctrl+C 退出。")
+
+    server = ThreadingHTTPServer(LISTEN, Handler)
+    # 终端终止 / 系统关停时，立即释放在途连接与监听端口
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    try:
+        signal.signal(signal.SIGHUP, _request_shutdown)  # 终端关闭（类 Unix）
+    except (AttributeError, ValueError):
+        pass
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()  # 释放监听 socket

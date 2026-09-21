@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token 用量统计</title>
+  <style>
+    :root {
+      --bg: #0f1420;
+      --card: #192032;
+      --line: #2a3450;
+      --fg: #e6ebf5;
+      --mut: #8a96b3;
+      --grn: #3ecf8e;
+      --blu: #5b9dff;
+      --org: #ffb454;
+      --red: #ff6b6b;
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.5 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif
+    }
+
+    header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap
+    }
+
+    header h1 {
+      font-size: 18px;
+      margin: 0
+    }
+
+    label {
+      color: var(--mut);
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px
+    }
+
+    input[type=date] {
+      background: var(--card);
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 14px
+    }
+
+    button {
+      background: var(--blu);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 14px;
+      cursor: pointer
+    }
+
+    button:hover {
+      filter: brightness(1.1)
+    }
+
+    button.danger {
+      background: var(--red)
+    }
+
+    main {
+      padding: 24px;
+      max-width: 1200px;
+      margin: 0 auto
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px
+    }
+
+    .card .k {
+      color: var(--mut);
+      font-size: 12px
+    }
+
+    .card .v {
+      font-size: 22px;
+      font-weight: 600;
+      margin-top: 6px
+    }
+
+    .v.grn {
+      color: var(--grn)
+    }
+
+    .v.blu {
+      color: var(--blu)
+    }
+
+    .v.org {
+      color: var(--org)
+    }
+
+    .v.red {
+      color: var(--red)
+    }
+
+    h2 {
+      font-size: 15px;
+      margin: 24px 0 12px;
+      color: var(--mut);
+      display: flex;
+      align-items: center;
+      gap: 12px
+    }
+
+    .bar2 {
+      display: flex;
+      align-items: center;
+      gap: 12px
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      border-radius: 12px;
+      overflow: hidden
+    }
+
+    th,
+    td {
+      padding: 10px 14px;
+      text-align: right;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap
+    }
+
+    th:first-child,
+    td:first-child {
+      text-align: left
+    }
+
+    th.chk,
+    td.chk {
+      text-align: center;
+      width: 36px
+    }
+
+    th {
+      color: var(--mut);
+      font-weight: 500;
+      font-size: 12px;
+      background: #141a2a
+    }
+
+    tr:hover td {
+      background: #1d2538
+    }
+
+    .txt {
+      max-width: 360px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      text-align: left
+    }
+
+    .txt.clickable {
+      cursor: pointer
+    }
+
+    .txt.clickable:hover {
+      color: var(--blu);
+      text-decoration: underline
+    }
+
+    #modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .6);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 50
+    }
+
+    #modal.show {
+      display: flex
+    }
+
+    #modal .box {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      max-width: 86vw;
+      max-height: 88vh;
+      width: 820px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden
+    }
+
+    #modal .bar {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      flex: none
+    }
+
+    #modal .bar button {
+      background: var(--blu);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 14px;
+      cursor: pointer
+    }
+
+    #modalCalc {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--mut);
+      font-size: 13px;
+      line-height: 1.7;
+      flex: none;
+      overflow: auto;
+      max-height: 32%
+    }
+
+    #modalCalc b {
+      color: var(--fg)
+    }
+
+    #modalText {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 16px;
+      overflow: hidden
+    }
+
+    .seg {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden
+    }
+
+    .seg-h {
+      flex: none;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .seg-h span {
+      flex: 1
+    }
+
+    .seg-b {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 12px 14px;
+      white-space: pre-wrap;
+      word-break: break-word
+    }
+
+    .seg .cp {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--mut);
+      border-radius: 6px;
+      padding: 2px 10px;
+      font-size: 11px;
+      cursor: pointer
+    }
+
+    .seg .cp:hover {
+      color: var(--fg);
+      border-color: var(--blu)
+    }
+
+    .msg {
+      margin: 0 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #141a2a
+    }
+
+    .msg:last-child {
+      margin-bottom: 0
+    }
+
+    .mrole {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      padding: 4px 10px;
+      background: #0f1420;
+      color: var(--mut)
+    }
+
+    .mbody {
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      word-break: break-word
+    }
+
+    .msg.sys .mrole {
+      color: #c4b5fd
+    }
+
+    .msg.usr .mrole {
+      color: #5eead4
+    }
+
+    .msg.asst .mrole {
+      color: #5b9dff
+    }
+
+    .msg.tool .mrole {
+      color: #ffb454
+    }
+
+    .seg.reason .seg-h {
+      background: rgba(167, 139, 250, .18);
+      color: #c4b5fd
+    }
+
+    .seg.reason .seg-b {
+      color: #c4b5fd
+    }
+
+    .seg.body .seg-h {
+      background: rgba(94, 234, 212, .16);
+      color: #5eead4
+    }
+
+    .seg.body .seg-b {
+      color: var(--fg)
+    }
+
+    .seg.raw .seg-h {
+      background: rgba(138, 150, 179, .18);
+      color: var(--mut)
+    }
+
+    .seg.raw .seg-b {
+      color: var(--mut);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px
+    }
+
+    .empty {
+      color: var(--mut);
+      padding: 30px;
+      text-align: center
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Token 用量统计</h1>
+    <label>从 <input type="date" id="from"></label>
+    <label>至 <input type="date" id="to"></label>
+    <button onclick="load()">查询</button>
+    <button onclick="quick('day')">本日</button>
+    <button onclick="quick('week')">本周</button>
+    <button onclick="quick('month')">本月</button>
+    <button onclick="quick('year')">本年</button>
+    <button class="danger" onclick="delRange()">删除本区间</button>
+    <span id="status" style="color:var(--mut)"></span>
+  </header>
+  <main>
+    <div class="cards" id="cards"></div>
+    <h2>按任务汇总</h2>
+    <table id="taskTbl">
+      <thead>
+        <tr>
+          <th>任务</th>
+          <th>调用</th>
+          <th>输入token</th>
+          <th>命中缓存</th>
+          <th>未命中</th>
+          <th>输出token</th>
+          <th>总计</th>
+          <th>金额 ¥/$</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <h2 class="bar2">明细记录
+      <button class="danger" onclick="delSelected()">删除选中</button>
+      <span id="selInfo" style="color:var(--mut);font-weight:400"></span>
+    </h2>
+    <table id="recTbl">
+      <thead>
+        <tr>
+          <th class="chk"><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th>
+          <th>时间</th>
+          <th>任务</th>
+          <th>输入token</th>
+          <th>命中缓存</th>
+          <th>未命中</th>
+          <th>输出token</th>
+          <th>总计</th>
+          <th>金额¥</th>
+          <th>输入内容</th>
+          <th>输出内容</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="empty" class="empty" style="display:none">该区间暂无记录</div>
+  </main>
+  <div id="modal" onclick="if(event.target===this)hideModal()">
+    <div class="box">
+      <div class="bar">
+        <span id="modalTitle" style="margin-right:auto;color:var(--mut);align-self:center"></span>
+        <button id="copyBtn" onclick="copyAll()">复制全部</button>
+        <button onclick="hideModal()">关闭</button>
+      </div>
+      <div id="modalCalc"></div>
+      <div id="modalText"></div>
+    </div>
+  </div>
+  <script>
+    const fmt = n => (n || 0).toLocaleString('en-US');
+    const today = () => new Date().toISOString().slice(0, 10);
+    document.getElementById('from').value = today();
+    document.getElementById('to').value = today();
+
+    function rangeQ() {
+      const f = document.getElementById('from').value || '';
+      const t = document.getElementById('to').value || '';
+      return 'from=' + encodeURIComponent(f) + '&to=' + encodeURIComponent(t);
+    }
+
+    function quick(period) {
+      const now = new Date();
+      const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+      let f, t = today();
+      if (period === 'day') {
+        f = `${y}-${pad(m + 1)}-${pad(d)}`;
+      } else if (period === 'week') {
+        const wd = now.getDay(); // 0=周日
+        const diffMon = wd === 0 ? 6 : wd - 1;
+        const mon = new Date(now);
+        mon.setDate(d - diffMon);
+        const sun = new Date(mon);
+        sun.setDate(mon.getDate() + 6);
+        f = `${mon.getFullYear()}-${pad(mon.getMonth() + 1)}-${pad(mon.getDate())}`;
+        t = `${sun.getFullYear()}-${pad(sun.getMonth() + 1)}-${pad(sun.getDate())}`;
+      } else if (period === 'month') {
+        f = `${y}-${pad(m + 1)}-01`;
+        t = lastDayOfMonth(y, m);
+      } else if (period === 'year') {
+        f = `${y}-01-01`;
+        t = `${y}-12-31`;
+      }
+      document.getElementById('from').value = f;
+      document.getElementById('to').value = t;
+      load();
+    }
+    const lastDayOfMonth = (y, m) => {
+      const last = new Date(y, m + 1, 0);
+      return `${last.getFullYear()}-${pad(last.getMonth() + 1)}-${pad(last.getDate())}`;
+    };
+    const pad = n => String(n).padStart(2, '0');
+
+    async function load() {
+      const q = rangeQ();
+      document.getElementById('status').textContent = '加载中…';
+      const [s, r] = await Promise.all([
+        fetch('/api/stats?' + q).then(x => x.json()),
+        fetch('/api/records?' + q).then(x => x.json())
+      ]);
+      const t = s.total;
+      const rate = (s.pricing && s.pricing.rmb_per_usd) || 7.1;
+      const both = v => `¥${v.toFixed(4)} / $${(v / rate).toFixed(4)}`;
+      document.getElementById('cards').innerHTML = `
+    <div class="card"><div class="k">调用次数</div><div class="v">${fmt(t.calls)}</div></div>
+    <div class="card"><div class="k">输入 token</div><div class="v blu">${fmt(t.prompt)}</div></div>
+    <div class="card"><div class="k">命中缓存</div><div class="v grn">${fmt(t.cached)}</div></div>
+    <div class="card"><div class="k">未命中</div><div class="v red">${fmt(t.uncached)}</div></div>
+    <div class="card"><div class="k">输出 token</div><div class="v org">${fmt(t.completion)}</div></div>
+    <div class="card"><div class="k">金额 ¥/$</div><div class="v">${both(t.cost)}</div></div>`;
+      const tb = document.querySelector('#taskTbl tbody');
+      tb.innerHTML = s.tasks.map(x => `<tr><td>${esc(x.task)}</td><td>${fmt(x.calls)}</td>
+    <td>${fmt(x.prompt)}</td><td>${fmt(x.cached)}</td><td>${fmt(x.uncached)}</td>
+    <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td></tr>`).join('');
+      const rb = document.querySelector('#recTbl tbody');
+      window.__rec = r;
+      window.__pricing = s.pricing;
+      rb.innerHTML = r.map((x, i) => `<tr><td class="chk"><input type="checkbox" class="sel" value="${x.id}"></td>
+    <td>${x.ts.slice(11)}</td><td>${esc(x.task)}${x.has_image ? ' 📎' : ''}</td>
+    <td>${fmt(x.prompt)}</td><td>${fmt(x.cached)}</td><td>${fmt(x.uncached)}</td>
+    <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td>
+    <td class="txt clickable" onclick="showFull('input',${i})">${cut(x.input)}</td>
+    <td class="txt clickable" onclick="showFull('output',${i})">${cut(x.output)}</td></tr>`).join('');
+      document.getElementById('empty').style.display = (r.length ? 'none' : 'block');
+      document.getElementById('status').textContent = '共 ' + r.length + ' 条记录';
+      updateSelInfo();
+    }
+    const cut = s => { s = s || ''; return s.length > 120 ? esc(s.slice(0, 120)) + '…' : esc(s); };
+    const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    function renderMessages(text) {
+      const parts = String(text).split(/^\[(\w+)\]\s*$/m);
+      let html = '';
+      const map = { system: 'sys', user: 'usr', assistant: 'asst', tool: 'tool' };
+      const label = { system: 'SYSTEM', user: 'USER', assistant: 'ASSISTANT', tool: 'TOOL' };
+      for (let i = 1; i < parts.length; i += 2) {
+        const role = parts[i];
+        const content = (parts[i + 1] || '').trim();
+        const cls = map[role] || 'sys';
+        const lab = label[role] || (role || '?').toUpperCase();
+        html += `<div class="msg ${cls}"><div class="mrole">${esc(lab)}</div>` +
+          `<div class="mbody">${content ? esc(content) : '<span style="color:var(--mut)">（空）</span>'}</div></div>`;
+      }
+      return html || '<span style="color:var(--mut)">（空）</span>';
+    }
+
+    function toggleAll(m) { document.querySelectorAll('.sel').forEach(c => c.checked = m.checked); updateSelInfo(); }
+    function updateSelInfo() {
+      const n = document.querySelectorAll('.sel:checked').length;
+      document.getElementById('selInfo').textContent = n ? ('已选 ' + n + ' 条') : '';
+    }
+    document.addEventListener('change', e => { if (e.target.classList.contains('sel')) updateSelInfo(); });
+
+    async function delSelected() {
+      const ids = [...document.querySelectorAll('.sel:checked')].map(c => +c.value);
+      if (!ids.length) { alert('请先勾选要删除的记录'); return; }
+      if (!confirm('确认删除选中的 ' + ids.length + ' 条记录？')) return;
+      const res = await fetch('/api/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids })
+      }).then(x => x.json());
+      document.getElementById('status').textContent = '已删除 ' + res.deleted + ' 条';
+      load();
+    }
+    async function delRange() {
+      const f = document.getElementById('from').value, t = document.getElementById('to').value;
+      if (!confirm('确认删除区间 [' + (f || '最早') + ' ~ ' + (t || '现在') + '] 的全部记录？')) return;
+      const res = await fetch('/api/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: f, to: t })
+      }).then(x => x.json());
+      document.getElementById('status').textContent = '已删除 ' + res.deleted + ' 条';
+      load();
+    }
+
+    function showFull(type, i) {
+      const rec = (window.__rec && window.__rec[i]) || {};
+      const pr = window.__pricing || { input_per_M: 0, cached_per_M: 0, output_per_M: 0 };
+      const p = +rec.prompt || 0, c = +rec.cached || 0, u = +rec.uncached || 0, o = +rec.completion || 0;
+      const cost = (u / 1e6 * pr.input_per_M + c / 1e6 * pr.cached_per_M + o / 1e6 * pr.output_per_M);
+      const rate = pr.rmb_per_usd || 7.1;
+      const costUsd = cost / rate;
+      const utf8 = s => s ? new TextEncoder().encode(s).length : 0;
+      const rawLen = (rec.raw || '').length, rawBytes = utf8(rec.raw);
+      const inLen = (rec.input || '').length, inBytes = utf8(rec.input);
+      const segs = [];
+      if (type === 'output') {
+        if (rec.reasoning) segs.push({ cls: 'reason', title: '深度思考 reasoning（' + (rec.reasoning || '').length + ' 字）', text: rec.reasoning });
+        if (rec.output) segs.push({ cls: 'body', title: '正文 content（' + (rec.output || '').length + ' 字）', text: rec.output });
+        document.getElementById('modalTitle').textContent = '输出内容（共 ' + ((rec.reasoning || '').length + (rec.output || '').length) + ' 字）';
+      } else {
+        segs.push({ cls: 'body', title: '可读输入（含全部角色转写，' + inLen + ' 字 / ' + fmt(inBytes) + ' 字节，不含图片/工具）', text: rec.input || '', render: 'messages' });
+        if (rec.raw) segs.push({ cls: 'raw', title: '原始请求 messages（完整 JSON，' + rawLen + ' 字 / ' + fmt(rawBytes) + ' 字节 UTF-8，含图片 base64 / 工具定义）', text: rec.raw });
+        document.getElementById('modalTitle').textContent = '输入内容（可读 ' + (rec.input || '').length + ' 字）';
+      }
+      window.__segs = segs.map(s => s.text);
+      document.getElementById('modalText').innerHTML = segs.map((s, k) =>
+        `<div class="seg ${s.cls}"><div class="seg-h"><span>${esc(s.title)}</span>` +
+        `<button class="cp" onclick="copySeg(this,${k})">复制</button></div>` +
+        `<div class="seg-b">${s.render === 'messages' ? renderMessages(s.text)
+          : (esc(s.text) || '<span style="color:var(--mut)">（空）</span>')}</div></div>`).join('')
+        || '<span style="color:var(--mut)">（空）</span>';
+      const outLen = (rec.output || '').length, outBytes = utf8(rec.output);
+      const reasonLen = (rec.reasoning || '').length, reasonBytes = utf8(rec.reasoning);
+      const calc = [];
+      calc.push(`<b>输入token</b> ${fmt(p)} = 命中缓存 ${fmt(c)} + 未命中 ${fmt(u)}　|　` +
+        `<b>输出token</b> ${fmt(o)}　|　总计 ${fmt(rec.total || 0)}`);
+      if (type === 'input') {
+        calc.push(`完整请求 messages（原始 JSON）：<b>${fmt(rawLen)}</b> 字 / <b>${fmt(rawBytes)}</b> 字节（UTF-8），含图片 base64、工具定义等全部内容`);
+        calc.push(`可读输入（仅文字）：<b>${fmt(inLen)}</b> 字 / <b>${fmt(inBytes)}</b> 字节 —— 与上面原始 JSON 不同，已丢弃图片/工具`);
+        calc.push(`若 prompt_tokens(${fmt(p)}) 远大于可读输入体量，差额主要来自<b>图片视觉 token + 聊天模板/特殊 token</b>（图片不计入可读文本，却是 token 大头）`);
+      } else {
+        if (reasonLen) calc.push(`深度思考 reasoning：<b>${fmt(reasonLen)}</b> 字 / <b>${fmt(reasonBytes)}</b> 字节（UTF-8）`);
+        calc.push(`正文 content：<b>${fmt(outLen)}</b> 字 / <b>${fmt(outBytes)}</b> 字节（UTF-8）`);
+      }
+      calc.push(`金额 = 未命中 ${fmt(u)}×${pr.input_per_M} + 命中 ${fmt(c)}×${pr.cached_per_M} ` +
+        `+ 输出 ${fmt(o)}×${pr.output_per_M} = <b>¥${cost.toFixed(6)}</b>　/　<b>$${costUsd.toFixed(6)}</b>`);
+      document.getElementById('modalCalc').innerHTML = calc.join('<br>');
+      document.getElementById('modal').classList.add('show');
+    }
+    function hideModal() { document.getElementById('modal').classList.remove('show'); }
+    async function _copy(text) {
+      try { await navigator.clipboard.writeText(text); return true; }
+      catch (e) {
+        const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+        ta.select(); try { document.execCommand('copy'); } catch (_) { } ta.remove(); return true;
+      }
+    }
+    function _flash(btn, txt) { btn.textContent = '已复制'; setTimeout(() => btn.textContent = txt, 1200); }
+    async function copySeg(btn, k) {
+      await _copy((window.__segs && window.__segs[k]) || '');
+      _flash(btn, '复制');
+    }
+    async function copyAll() {
+      const all = (window.__segs || []).join('\n\n');
+      await _copy(all);
+      _flash(document.getElementById('copyBtn'), '复制全部');
+    }
+    load();
+  </script>
+</body>
+
+</html>
