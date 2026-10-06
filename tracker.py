@@ -46,6 +46,25 @@ OFFPEAK_PRICING = {
 }
 EXCHANGE_RATE_RMB_PER_USD = 7.00  # 汇率：1 USD = 7.00 RMB，用于在前端折算美元显示
 
+# ----------------------------- 自定义余额（持久化在 SQLite） -----------------------------
+# 余额 = 累计发放额度（ledger 流水合计） - 累计消耗金额（- EXTRA_USED_RMB）
+# 额度不再是配置文件：首次启动把 INITIAL_BALANCE_RMB 作为一条「初始额度」流水写入数据库，
+# 之后由 Web 页面（增加/扣减/设定总额）或 POST /api/balance 随时增减，全部落库可追溯。
+# INITIAL_BALANCE_RMB 设为 None 或 <= 0 表示初始不限额（接口返回 balance=null、unlimited=true）
+INITIAL_BALANCE_RMB = 100.00  # 自定义初始余额额度（¥），仅首次启动时入库，之后以数据库为准
+EXTRA_USED_RMB = 0.0          # 自定义：额度之外已消耗的金额（计入累计消耗，用于接续旧账）
+
+# 余额查询接口的路径别名 -> 响应格式（full=本项目标准格式；openai/grants=兼容常见客户端探测格式）
+BALANCE_ALIASES = {
+    "/api/balance": "full",
+    "/balance": "full",
+    "/user/balance": "full",
+    "/api/user/balance": "full",
+    "/v1/dashboard/billing/subscription": "openai",
+    "/dashboard/billing/subscription": "openai",
+    "/dashboard/billing/credit_grants": "grants",
+}
+
 # 兼容历史字段/前端：暴露一份“参考单价”（取高峰价）对象，前端用于展示单位价格与汇率
 PRICING = dict(PEAK_PRICING)
 PRICING["rmb_per_usd"] = EXCHANGE_RATE_RMB_PER_USD
@@ -94,7 +113,29 @@ conn.execute("""CREATE TABLE IF NOT EXISTS usage (
     cost_rmb REAL,
     has_image INTEGER DEFAULT 0
 )""")
+# 余额流水表：额度增减全部落库（不依赖任何外部配置文件）
+#   kind: init 初始额度 / topup 增加 / deduct 扣减 / set 设定总额
+#   amount: 有符号变动额（+ 增加额度，- 扣减额度），累计额度 = SUM(amount)
+conn.execute("""CREATE TABLE IF NOT EXISTS ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT,
+    day TEXT,
+    kind TEXT,
+    amount REAL,
+    note TEXT
+)""")
 conn.commit()
+
+# 首次启动：把自定义初始额度写入流水（已有流水则跳过，数据库为准）
+if INITIAL_BALANCE_RMB and INITIAL_BALANCE_RMB > 0:
+    with _lock:
+        if conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0] == 0:
+            _now = datetime.datetime.now()
+            conn.execute("INSERT INTO ledger (ts, day, kind, amount, note) "
+                         "VALUES (?,?,?,?,?)",
+                         (_now.isoformat(timespec="seconds"), _now.strftime("%Y-%m-%d"),
+                          "init", float(INITIAL_BALANCE_RMB), "初始额度"))
+            conn.commit()
 
 # 字段配置：入库的输入/输出文本最大长度，0 = 不限制（存全文）
 MAX_INPUT = 0
@@ -212,6 +253,121 @@ def delete_records(ids=None, from_d=None, to_d=None, task=None):
         cur = conn.execute("DELETE FROM usage" + where, params)
         conn.commit()
         return cur.rowcount
+
+
+# ----------------------------- 余额（自定义额度，落库管理） -----------------------------
+def _int_arg(v, default=0):
+    """把查询串等外部输入安全转成 int，失败返回 default。"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def granted_total():
+    """累计发放额度 = ledger 流水合计。返回 (额度合计, 流水条数)。"""
+    with _lock:
+        row = conn.execute("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM ledger").fetchone()
+    return round(row[0] or 0, 6), row[1] or 0
+
+
+def adjust_balance(delta, note="", kind=None):
+    """增减余额额度：写入一条 ledger 流水（有符号 amount），返回最新余额信息。
+
+    delta > 0 增加额度，delta < 0 扣减额度。传 kind 可自定义类型标签。
+    """
+    delta = round(float(delta), 6)
+    if delta == 0:
+        raise ValueError("变动金额不能为 0")
+    now = datetime.datetime.now()
+    with _lock:
+        conn.execute("INSERT INTO ledger (ts, day, kind, amount, note) VALUES (?,?,?,?,?)",
+                     (now.isoformat(timespec="seconds"), now.strftime("%Y-%m-%d"),
+                      kind or ("topup" if delta > 0 else "deduct"), delta,
+                      str(note or "")[:200]))
+        conn.commit()
+    return query_balance()
+
+
+def set_granted(value, note=""):
+    """把累计额度直接设定为 value（自动换算增减额并记流水）。"""
+    target = round(float(value), 6)
+    current, _n = granted_total()
+    if round(target - current, 6) == 0:
+        return query_balance()  # 已是目标额度，不记流水
+    return adjust_balance(target - current, note=note or "设定总额", kind="set")
+
+
+def query_ledger(limit=50):
+    """额度流水（倒序）。"""
+    limit = _int_arg(limit, 50)
+    limit = max(1, min(limit, 500))
+    with _lock:
+        rows = conn.execute("SELECT id, ts, kind, amount, note FROM ledger "
+                            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [{"id": r[0], "ts": r[1], "kind": r[2], "amount": round(r[3], 6),
+             "note": r[4] or ""} for r in rows]
+
+
+def delete_ledger(ids=None):
+    """删除额度流水（撤销误操作），额度自动按剩余流水重算。返回删除条数。"""
+    ids = [int(i) for i in (ids or []) if str(i).lstrip("-").isdigit()]
+    if not ids:
+        return 0
+    ph = ",".join("?" * len(ids))
+    with _lock:
+        cur = conn.execute(f"DELETE FROM ledger WHERE id IN ({ph})", ids)
+        conn.commit()
+        return cur.rowcount
+
+
+def query_balance(task=None):
+    """查询自定义余额：累计发放额度 - 累计消耗。可按任务（task）分别核算。"""
+    granted, entries = granted_total()
+    # 没有任何额度流水 -> 未配置额度，按不限额处理
+    unlimited = entries == 0
+    extra = EXTRA_USED_RMB
+
+    def _sum(from_d=None, to_d=None):
+        where, params = _where(from_d, to_d, task)
+        with _lock:
+            return conn.execute(
+                f"SELECT COUNT(*), SUM(prompt_tokens), SUM(cached_tokens), "
+                f"SUM(uncached_tokens), SUM(completion_tokens), SUM(total_tokens), "
+                f"SUM({cost_col}) FROM usage" + where, params).fetchone()
+
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    total = _sum()
+    used_total = round((total[6] or 0) + extra, 6)
+    used_today = round(_sum(today, today)[6] or 0, 6)
+    used_month = round(_sum(today[:7] + "-01", today)[6] or 0, 6)
+    balance = None if unlimited else round(granted - used_total, 6)
+    pct = None if unlimited or granted <= 0 else round(used_total / granted * 100, 4)
+    return {
+        "object": "balance",
+        "balance": balance,                 # 剩余余额（¥），不限额时为 null
+        "currency": "CNY",
+        "unlimited": unlimited,
+        "overdrawn": (balance is not None and balance < 0),
+        "granted": granted,                 # 累计发放额度（¥）= 流水合计
+        "initial_balance": granted,         # 兼容字段（同 granted）
+        "ledger_entries": entries,          # 额度流水条数
+        "total_used": used_total,           # 累计消耗（¥）
+        "used_today": used_today,
+        "used_this_month": used_month,
+        "extra_used": round(extra, 6),      # 自定义的额外已用金额
+        "used_percent": pct,                # 已用百分比
+        "remaining_percent": None if pct is None else round(100 - pct, 4),
+        "task": task or None,               # 核算维度：None=全部
+        "calls": total[0] or 0,
+        "prompt_tokens": total[1] or 0,
+        "cached_tokens": total[2] or 0,
+        "uncached_tokens": total[3] or 0,
+        "completion_tokens": total[4] or 0,
+        "total_tokens": total[5] or 0,
+        "pricing": PRICING,
+        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
 
 
 # ----------------------------- usage 解析 -----------------------------
@@ -401,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p in ("/", "/index.html", "/web.html"):
             self._send_html(load_html())
+        elif p in BALANCE_ALIASES:
+            self._balance_api(BALANCE_ALIASES[p])
         elif p.startswith("/api/"):
             self._api(p)
         else:
@@ -408,8 +566,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = self.path.split("?")[0]
-        if p == "/api/delete":
+        if p in ("/api/delete", "/api/delete/"):
             self._api_delete()
+        elif p in ("/api/balance", "/api/balance/", "/api/balance/set"):
+            self._api_adjust_balance()
+        elif p in ("/api/balance/delete", "/api/ledger/delete"):
+            self._api_delete_ledger()
         elif p.startswith("/v1/"):
             self._proxy("POST")
         else:
@@ -424,8 +586,91 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, query_stats(f, t))
         elif p.startswith("/api/records"):
             self._send_json(200, query_records(f, t))
+        elif p.startswith("/api/balance/log"):  # 额度流水（须在 /api/balance 之前判断）
+            self._send_json(200, query_ledger(_int_arg(qs.get("limit", ["50"])[0], 50)))
+        elif p.startswith("/api/balance"):
+            self._balance_api("full")
         else:
             self._send_json(404, {"error": "not found"})
+
+    def _balance_api(self, fmt="full"):
+        """余额查询：GET，支持 ?task=xx 指定任务维度；fmt 决定响应格式。"""
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        b = query_balance(qs.get("task", [""])[0] or None)
+        remain = b["balance"]
+        if fmt == "openai":  # 兼容 OpenAI 旧版 billing 探测格式
+            hard = None if not isinstance(remain, (int, float)) else round(
+                float(remain) / EXCHANGE_RATE_RMB_PER_USD, 2)
+            self._send_json(200, {
+                "object": "billing_subscription",
+                "has_payment_method": True,
+                "soft_limit_usd": hard,
+                "hard_limit_usd": hard,
+                "system_hard_limit_usd": hard,
+                "access_until": int((datetime.datetime.now()
+                                     + datetime.timedelta(days=3650)).timestamp()),
+            })
+        elif fmt == "grants":  # 兼容 credit_grants 格式
+            self._send_json(200, {
+                "object": "credit_summary",
+                "total_granted": b["granted"],
+                "total_used": b["total_used"],
+                "total_available": b["balance"],
+            })
+        else:
+            self._send_json(200, b)
+
+    def _api_adjust_balance(self):
+        """增减余额（落库）：POST {"delta": 50} 增减 / {"set": 200} 设定总额，可带 {"note": "..."}。"""
+        body = self._read_body()
+        if not isinstance(body, dict):
+            self._send_json(400, {"error": "invalid_body",
+                                  "detail": "body 需为 JSON 对象"})
+            return
+        note = body.get("note") or ""
+        try:
+            if body.get("set") is not None:
+                result = set_granted(body["set"], note)
+            elif body.get("delta") is not None:
+                result = adjust_balance(body["delta"], note)
+            else:
+                self._send_json(400, {"error": "invalid_body",
+                                      "detail": '需要 {"delta": ±金额} 或 {"set": 总额}'})
+                return
+        except (TypeError, ValueError) as e:
+            self._send_json(400, {"error": "invalid_balance", "detail": str(e)})
+            return
+        except Exception as e:
+            self._send_json(500, {"error": "balance_error", "detail": str(e)})
+            return
+        result["ledger"] = query_ledger(50)
+        self._send_json(200, result)
+
+    def _api_delete_ledger(self):
+        """删除额度流水：POST {"ids":[...]}（额度按剩余流水自动重算）。"""
+        body = self._read_body()
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if ids is not None and not isinstance(ids, list):
+            ids = None
+        deleted = delete_ledger(ids=ids)
+        self._send_json(200, {"deleted": deleted, "ledger": query_ledger(50),
+                              "balance": query_balance()})
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            return {}
+
+    def _api_delete(self):
+        body = self._read_body()
+        ids = body.get("ids")
+        if ids is not None and not isinstance(ids, list):
+            ids = None
+        deleted = delete_records(ids=ids, from_d=body.get("from"), to_d=body.get("to"),
+                                  task=body.get("task"))
+        self._send_json(200, {"deleted": deleted})
 
     def _api_delete(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -655,6 +900,8 @@ def _request_shutdown(signum, frame):
 if __name__ == "__main__":
     print(f"token-tracker 启动: http://0.0.0.0:{LISTEN[1]}  ->  {BACKEND}")
     print(f"SQLite: {DB_PATH}")
+    print(f"余额接口: GET /api/balance（额度-累计消耗），Web 页可增减额度；"
+          f"当前额度 {granted_total()[0]}")
     print(f"浏览器打开 http://127.0.0.1:{LISTEN[1]}/web.html 按日期查询；客户端 base_url 改连 11435 并带 X-Task-Id/user 区分任务。Ctrl+C 退出。")
 
     server = ThreadingHTTPServer(LISTEN, Handler)

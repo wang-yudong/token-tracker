@@ -60,6 +60,54 @@
       font-size: 14px
     }
 
+    input[type=number],
+    input[type=text] {
+      background: var(--card);
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 14px;
+      width: 110px
+    }
+
+    input[type=text] {
+      width: 180px
+    }
+
+    .pbar {
+      height: 8px;
+      background: #141a2a;
+      border: 1px solid var(--line);
+      border-radius: 99px;
+      overflow: hidden;
+      margin-top: 10px
+    }
+
+    .pbar>i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--grn), var(--org))
+    }
+
+    .pbar.low>i {
+      background: linear-gradient(90deg, var(--org), var(--red))
+    }
+
+    th.op,
+    td.op {
+      text-align: center;
+      width: 96px
+    }
+
+    .pos {
+      color: var(--grn)
+    }
+
+    .neg {
+      color: var(--red)
+    }
+
     button {
       background: var(--blu);
       color: #fff;
@@ -407,6 +455,34 @@
     <span id="status" style="color:var(--mut)"></span>
   </header>
   <main>
+    <h2 class="bar2">余额<span style="color:var(--mut);font-weight:400">
+        余额 = 累计发放额度 − 累计消耗（额度存于 SQLite，可在下方增减）</span>
+    </h2>
+    <div class="cards" id="balCards"></div>
+    <div class="bar2" style="margin-bottom:22px">
+      <label>金额 ¥ <input type="number" id="balAmt" step="0.01" min="0" value="10"></label>
+      <button onclick="balAdjust(1)">增加余额</button>
+      <button class="danger" onclick="balAdjust(-1)">扣减余额</button>
+      <label>设为总额 ¥ <input type="number" id="balSetVal" step="0.01" min="0" placeholder="如 200"></label>
+      <button onclick="balSetTotal()">设定总额</button>
+      <label>备注 <input type="text" id="balNote" placeholder="可选，记账用"></label>
+      <span id="balMsg" style="color:var(--mut)"></span>
+    </div>
+    <h2 class="bar2">额度流水<span id="balInfo" style="color:var(--mut);font-weight:400"></span>
+    </h2>
+    <table id="ledgerTbl">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>类型</th>
+          <th>额度变动 ¥</th>
+          <th>备注</th>
+          <th class="op">操作</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <h2>用量统计（按上方日期区间）</h2>
     <div class="cards" id="cards"></div>
     <h2>按任务汇总</h2>
     <table id="taskTbl">
@@ -506,9 +582,12 @@
     async function load() {
       const q = rangeQ();
       document.getElementById('status').textContent = '加载中…';
-      const [s, r] = await Promise.all([
+      // 用量统计 + 余额/额度流水一并刷新（点“查询”即可看到最新余额）
+      const [s, r, b, log] = await Promise.all([
         fetch('/api/stats?' + q).then(x => x.json()),
-        fetch('/api/records?' + q).then(x => x.json())
+        fetch('/api/records?' + q).then(x => x.json()),
+        fetch('/api/balance').then(x => x.json()),
+        fetch('/api/balance/log?limit=50').then(x => x.json())
       ]);
       const t = s.total;
       const rate = (s.pricing && s.pricing.rmb_per_usd) || 7.1;
@@ -533,12 +612,78 @@
     <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td>
     <td class="txt clickable" onclick="showFull('input',${i})">${cut(x.input)}</td>
     <td class="txt clickable" onclick="showFull('output',${i})">${cut(x.output)}</td></tr>`).join('');
+      renderBalance(b, log);   // 余额卡片 + 额度流水随查询一起刷新
       document.getElementById('empty').style.display = (r.length ? 'none' : 'block');
-      document.getElementById('status').textContent = '共 ' + r.length + ' 条记录';
+      document.getElementById('status').textContent = '共 ' + r.length + ' 条记录 · 剩余余额 ' + money(b.balance);
       updateSelInfo();
     }
     const cut = s => { s = s || ''; return s.length > 120 ? esc(s.slice(0, 120)) + '…' : esc(s); };
     const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+    /* ---------------- 余额（额度增减，数据存于 SQLite） ---------------- */
+    const KIND = { init: '初始额度', topup: '增加', deduct: '扣减', set: '设定总额' };
+    const money = v => (v === null || v === undefined) ? '不限额' : '¥' + (+v).toFixed(4);
+    const postJSON = (path, obj) => fetch(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj)
+    }).then(x => x.json());
+
+    function renderBalance(b, log) {   // 渲染余额卡片 + 额度流水（由 load 与余额操作共用）
+      window.__bal = b;
+      const hasPct = b.used_percent !== null && b.used_percent !== undefined;
+      const pct = hasPct ? Math.max(0, Math.min(100, b.used_percent)) : 0;
+      const cls = b.balance === null ? 'blu' : (b.balance < 0 ? 'red' : 'grn');
+      document.getElementById('balCards').innerHTML = `
+    <div class="card"><div class="k">剩余余额</div><div class="v ${cls}">${money(b.balance)}</div></div>
+    <div class="card"><div class="k">累计发放额度</div><div class="v blu">${money(b.granted)}</div></div>
+    <div class="card"><div class="k">累计消耗</div><div class="v">${money(b.total_used)}</div></div>
+    <div class="card"><div class="k">今日 / 本月消耗</div><div class="v org">${money(b.used_today)} / ${money(b.used_this_month)}</div></div>
+    <div class="card"><div class="k">额度使用进度</div><div class="v">${hasPct ? (+b.used_percent).toFixed(2) + '%' : '—'}</div>
+      <div class="pbar${hasPct && b.used_percent >= 80 ? ' low' : ''}"><i style="width:${pct}%"></i></div></div>`;
+      document.getElementById('balInfo').textContent = b.unlimited
+        ? '未配置额度（不限额）' : ('共 ' + b.ledger_entries + ' 条流水');
+      document.querySelector('#ledgerTbl tbody').innerHTML = (log || []).map(x => `<tr>
+    <td>${String(x.ts || '').replace('T', ' ').slice(5, 16)}</td>
+    <td>${esc(KIND[x.kind] || x.kind)}</td>
+    <td class="${x.amount >= 0 ? 'pos' : 'neg'}">${x.amount >= 0 ? '+' : ''}${(+x.amount).toFixed(4)}</td>
+    <td class="txt">${esc(x.note)}</td>
+    <td class="op"><button class="danger" onclick="delLedger(${x.id})">撤销</button></td></tr>`).join('')
+        || '<tr><td colspan="5" style="text-align:center;color:var(--mut)">暂无额度流水</td></tr>';
+    }
+
+    function balMsg(txt, ok) {
+      const el = document.getElementById('balMsg');
+      el.textContent = txt;
+      el.style.color = ok ? 'var(--grn)' : 'var(--red)';
+    }
+
+    async function balAdjust(sign) {
+      const v = Math.abs(parseFloat(document.getElementById('balAmt').value) || 0);
+      if (!v) { balMsg('请先输入金额', false); return; }
+      const note = document.getElementById('balNote').value.trim();
+      const r = await postJSON('/api/balance', { delta: sign * v, note });
+      if (r.error) { balMsg(r.detail || r.error, false); return; }
+      balMsg((sign > 0 ? '已增加 ¥' : '已扣减 ¥') + v.toFixed(2) + '，余额 ' + money(r.balance), true);
+      renderBalance(r, r.ledger || []);
+    }
+
+    async function balSetTotal() {
+      const raw = document.getElementById('balSetVal').value;
+      const v = parseFloat(raw);
+      if (raw === '' || isNaN(v) || v < 0) { balMsg('请输入非负的总额', false); return; }
+      const note = document.getElementById('balNote').value.trim();
+      const r = await postJSON('/api/balance', { set: v, note });
+      if (r.error) { balMsg(r.detail || r.error, false); return; }
+      balMsg('额度已设为 ¥' + v.toFixed(2) + '，余额 ' + money(r.balance), true);
+      renderBalance(r, r.ledger || []);
+    }
+
+    async function delLedger(id) {
+      if (!confirm('确认撤销这条额度流水？余额将按剩余流水重算。')) return;
+      const r = await postJSON('/api/balance/delete', { ids: [id] });
+      if (r.error) { balMsg(r.detail || r.error, false); return; }
+      balMsg('已撤销 1 条流水，余额 ' + money(r.balance.balance), true);
+      renderBalance(r.balance, r.ledger);
+    }
     function renderMessages(text) {
       const parts = String(text).split(/^\[(\w+)\]\s*$/m);
       let html = '';
@@ -571,7 +716,7 @@
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids })
       }).then(x => x.json());
       document.getElementById('status').textContent = '已删除 ' + res.deleted + ' 条';
-      load();
+      load();   // 重新查询（含余额刷新）
     }
     async function delRange() {
       const f = document.getElementById('from').value, t = document.getElementById('to').value;
@@ -581,7 +726,7 @@
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: f, to: t })
       }).then(x => x.json());
       document.getElementById('status').textContent = '已删除 ' + res.deleted + ' 条';
-      load();
+      load();   // 重新查询（含余额刷新）
     }
 
     function showFull(type, i) {
@@ -647,7 +792,7 @@
       await _copy(all);
       _flash(document.getElementById('copyBtn'), '复制全部');
     }
-    load();
+    load();   // 首屏：用量 + 余额一次拉齐
   </script>
 </body>
 
