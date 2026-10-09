@@ -12,6 +12,8 @@
 """
 import json
 import os
+import re
+import collections
 import sys
 import sqlite3
 import threading
@@ -19,6 +21,7 @@ import atexit
 import signal
 import socket
 import datetime
+import hashlib
 import select
 import urllib.request
 import urllib.error
@@ -29,6 +32,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = "http://localhost:11434"
 LISTEN = ("0.0.0.0", 11435)
 DB_PATH = os.path.join(HERE, "usage.db")
+
+# ----------------------------- 会话识别（任务分组） -----------------------------
+# 实测结论（dsh / CodeBuddy 等客户端均未提供可配置的自定义请求头）：
+#   - CodeBuddy 自定义模型配置只有 url/apiKey，无 headers 字段；
+#   - dsh 的 llm-pi-ai provider 也只有 apiKeyEnv/api/baseURL，无 headers。
+# 因此任务名按下列优先级推导，可用USE_TASK_HEADER/BODY/FINGERPRINT 开关或改候选字段名来调整。
+USE_TASK_HEADER = True       # 1) 请求头 X-Task-Id（脚本调用方可显式指定，最高优先）
+TASK_HEADER_NAME = "X-Task-Id"
+USE_TASK_BODY = True         # 2) 请求体会话字段：user / metadata.user_id / session_id / conversation_id ...
+TASK_BODY_FIELDS = ("user", "metadata.user_id")  # OpenAI 兼容协议里真实存在的会话字段
+TASK_BODY_SKIP_IF_MODEL = True  # user 值若等于模型名（有些客户端拿它放模型名），视为无效
+USE_TASK_FINGERPRINT = True  # 3) 会话指纹：同一会话每轮都会重发完整历史，首条消息稳定 -> 用它做指纹
+TASK_FINGERPRINT_PREFIX = 20  # 指纹里保留首条消息前 N 个字符，便于肉眼识别
+TASK_FINGERPRINT_MAX = 400    # 参与指纹计算的首条消息最大截取长度
+TASK_DEFAULT = "default"      # 都取不到时的兜底名
+TRACE_SIZE = 200              # 最近 N 条请求的诊断记录（GET /api/trace），用于确认客户端实际发了什么
+TRACE_VERBOSE = os.environ.get("TRACKER_TRACE", "") not in ("", "0")  # 设 TRACKER_TRACE=1 时把诊断打到控制台
+TRACE_MASK = ("authorization", "x-api-key", "api-key", "cookie", "proxy-authorization")
 
 # 等价 API 折算价（每 1M token，单位：人民币 ¥，参考 DeepSeek 最新模型，可自行修改）
 # 时段定义（北京时间）：高峰 = 工作日 9:00–12:00、14:00–18:00；
@@ -153,6 +174,12 @@ if "input_raw" not in _cols:
     conn.execute("ALTER TABLE usage ADD COLUMN input_raw TEXT")
 if "has_image" not in _cols:
     conn.execute("ALTER TABLE usage ADD COLUMN has_image INTEGER DEFAULT 0")
+if "model" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN model TEXT")          # 请求里的模型名（客户端/后端区分）
+if "user_agent" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN user_agent TEXT")     # 客户端 UA（区分 dsh / CodeBuddy 等）
+if "task_src" not in _cols:
+    conn.execute("ALTER TABLE usage ADD COLUMN task_src TEXT")       # 任务名来源：header/body/fingerprint
 # 历史库：cost_usd 重命名为 cost_rmb（语义修正——该列实际存的是人民币，非美元）
 cost_col = "cost_rmb"
 if "cost_usd" in _cols and "cost_rmb" not in _cols:
@@ -171,23 +198,31 @@ def compute_cost(u, pricing):
 
 
 def save_usage(task_id, u, input_text="", output_text="", reasoning_text="",
-               input_raw="", has_image=0):
+               input_raw="", has_image=0, model="", user_agent="", task_src=""):
     now = datetime.datetime.now()
     pricing = _current_pricing()  # 按当前北京时间取高峰/闲时单价
     with _lock:
         conn.execute(
             "INSERT INTO usage (ts, day, task, prompt_tokens, cached_tokens, "
             "uncached_tokens, completion_tokens, total_tokens, {cc}, "
-            "input_text, output_text, reasoning_text, input_raw, has_image) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)".format(cc=cost_col),
+            "input_text, output_text, reasoning_text, input_raw, has_image, "
+            "model, user_agent, task_src) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)".format(cc=cost_col),
             (now.isoformat(timespec="seconds"), now.strftime("%Y-%m-%d"), task_id,
              u["prompt_tokens"], u["cached_tokens"], u["uncached_tokens"],
              u["completion_tokens"], u["total_tokens"], round(compute_cost(u, pricing), 6),
-             input_text, output_text, reasoning_text, input_raw, int(has_image)))
+             input_text, output_text, reasoning_text, input_raw, int(has_image),
+             str(model or "")[:120], str(user_agent or "")[:200], str(task_src or "")[:40]))
         conn.commit()
 
 
-def _where(from_d, to_d, task=None):
+def _like(kw):
+    """把用户输入转成 LIKE 的模糊匹配串（转义 % _ \\ 通配符）。"""
+    kw = kw.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return "%" + kw + "%"
+
+
+def _where(from_d, to_d, task=None, task_like=None, input_like=None):
     clauses, params = [], []
     if from_d:
         clauses.append("day >= ?"); params.append(from_d)
@@ -195,11 +230,55 @@ def _where(from_d, to_d, task=None):
         clauses.append("day <= ?"); params.append(to_d)
     if task:
         clauses.append("task = ?"); params.append(task)
+    if task_like and task_like.strip():
+        clauses.append("task LIKE ? ESCAPE '\\'"); params.append(_like(task_like))
+    if input_like and input_like.strip():
+        clauses.append("input_text LIKE ? ESCAPE '\\'"); params.append(_like(input_like))
     return ((" WHERE " + " AND ".join(clauses)) if clauses else ""), params
 
 
-def query_stats(from_d, to_d, task=None):
-    where, params = _where(from_d, to_d, task)
+def _task_rows(rows):
+    return [{"task": r[0], "calls": r[1], "prompt": r[2] or 0, "cached": r[3] or 0,
+             "uncached": r[4] or 0, "completion": r[5] or 0, "total": r[6] or 0,
+             "cost": round(r[7] or 0, 6), "first_ts": r[8] or "", "last_ts": r[9] or ""}
+            for r in rows]
+
+
+_TASK_GROUP_SQL = ("SELECT task, COUNT(1), SUM(prompt_tokens), SUM(cached_tokens), "
+                   "SUM(uncached_tokens), SUM(completion_tokens), SUM(total_tokens), "
+                   "SUM(" + cost_col + "), MIN(ts), MAX(ts) FROM usage")
+
+
+def query_tasks(from_d=None, to_d=None, task_like=None, input_like=None, limit=300):
+    """任务清单（供搜索框下拉建议）：任务名 + 调用次数 + token + 金额。"""
+    where, params = _where(from_d, to_d, None, task_like, input_like)
+    with _lock:
+        rows = conn.execute(_TASK_GROUP_SQL + where +
+                            " GROUP BY task ORDER BY COUNT(1) DESC LIMIT ?",
+                            params + [int(limit)]).fetchall()
+    return _task_rows(rows)
+
+
+def query_tasks_page(from_d=None, to_d=None, task_like=None, input_like=None,
+                     page=1, size=10):
+    """按任务汇总的分页查询：返回 {total, page, size, pages, items}。"""
+    page = max(1, _int_arg(page, 1))
+    size = max(1, min(200, _int_arg(size, 10)))
+    where, params = _where(from_d, to_d, None, task_like, input_like)
+    with _lock:
+        total = conn.execute("SELECT COUNT(DISTINCT task) FROM usage" + where,
+                             params).fetchone()[0] or 0
+        rows = conn.execute(_TASK_GROUP_SQL + where +
+                            " GROUP BY task ORDER BY SUM(total_tokens) DESC LIMIT ? OFFSET ?",
+                            params + [size, (page - 1) * size]).fetchall()
+    pages = max(1, (total + size - 1) // size)
+    page = min(page, pages)
+    return {"total": total, "page": page, "size": size, "pages": pages,
+            "items": _task_rows(rows)}
+
+
+def query_stats(from_d, to_d, task=None, task_like=None, input_like=None):
+    where, params = _where(from_d, to_d, task, task_like, input_like)
     with _lock:
         rows = conn.execute(
             f"SELECT task, COUNT(*), SUM(prompt_tokens), SUM(cached_tokens), "
@@ -219,18 +298,41 @@ def query_stats(from_d, to_d, task=None):
     return {"from": from_d, "to": to_d, "total": total, "tasks": tasks, "pricing": PRICING}
 
 
-def query_records(from_d, to_d, task=None):
-    where, params = _where(from_d, to_d, task)
-    with _lock:
-        rows = conn.execute(
-            f"SELECT id, ts, task, prompt_tokens, cached_tokens, uncached_tokens, "
-            f"completion_tokens, total_tokens, {cost_col}, input_text, output_text, "
-            f"reasoning_text, input_raw, has_image FROM usage" + where + " ORDER BY id DESC", params).fetchall()
+_RECORD_COLS = ("SELECT id, ts, task, prompt_tokens, cached_tokens, uncached_tokens, "
+                "completion_tokens, total_tokens, " + cost_col + ", input_text, output_text, "
+                "reasoning_text, input_raw, has_image, model, user_agent, task_src FROM usage")
+
+
+def _record_rows(rows):
     return [{"id": r[0], "ts": r[1], "task": r[2], "prompt": r[3], "cached": r[4],
              "uncached": r[5], "completion": r[6], "total": r[7],
              "cost": round(r[8], 6), "input": r[9] or "", "output": r[10] or "",
-             "reasoning": r[11] or "", "raw": r[12] or "", "has_image": r[13] or 0}
+             "reasoning": r[11] or "", "raw": r[12] or "", "has_image": r[13] or 0,
+             "model": r[14] or "", "client": r[15] or "", "task_src": r[16] or ""}
             for r in rows]
+
+
+def query_records(from_d, to_d, task=None, task_like=None, input_like=None):
+    where, params = _where(from_d, to_d, task, task_like, input_like)
+    with _lock:
+        rows = conn.execute(_RECORD_COLS + where + " ORDER BY id DESC", params).fetchall()
+    return _record_rows(rows)
+
+
+def query_records_page(from_d, to_d, task=None, task_like=None, input_like=None,
+                       page=1, size=20):
+    """分页查询明细记录：返回 {total, page, size, pages, items}（列表页用）。"""
+    page = max(1, _int_arg(page, 1))
+    size = max(1, min(200, _int_arg(size, 20)))
+    where, params = _where(from_d, to_d, task, task_like, input_like)
+    with _lock:
+        total = conn.execute("SELECT COUNT(1) FROM usage" + where, params).fetchone()[0] or 0
+        rows = conn.execute(_RECORD_COLS + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
+                            params + [size, (page - 1) * size]).fetchall()
+    pages = max(1, (total + size - 1) // size)
+    page = min(page, pages)
+    return {"total": total, "page": page, "size": size, "pages": pages,
+            "items": _record_rows(rows)}
 
 
 def delete_records(ids=None, from_d=None, to_d=None, task=None):
@@ -255,6 +357,11 @@ def delete_records(ids=None, from_d=None, to_d=None, task=None):
         return cur.rowcount
 
 
+def _exact_task(qs):
+    """从查询串取精确任务名：?task=xxx（点「按任务汇总」行时用）。"""
+    return (qs.get("task", [""])[0] or "").strip() or None
+
+
 # ----------------------------- 余额（自定义额度，落库管理） -----------------------------
 def _int_arg(v, default=0):
     """把查询串等外部输入安全转成 int，失败返回 default。"""
@@ -264,10 +371,17 @@ def _int_arg(v, default=0):
         return default
 
 
-def granted_total():
-    """累计发放额度 = ledger 流水合计。返回 (额度合计, 流水条数)。"""
+def granted_total(as_of=None):
+    """累计发放额度 = ledger 流水合计。返回 (额度合计, 流水条数)。
+
+    as_of 给定时只统计该日期（含）之前的流水，即“截止某日的累计发放额度”。
+    """
     with _lock:
-        row = conn.execute("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM ledger").fetchone()
+        if as_of:
+            row = conn.execute("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM ledger "
+                               "WHERE day <= ?", (as_of,)).fetchone()
+        else:
+            row = conn.execute("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM ledger").fetchone()
     return round(row[0] or 0, 6), row[1] or 0
 
 
@@ -321,8 +435,11 @@ def delete_ledger(ids=None):
         return cur.rowcount
 
 
-def query_balance(task=None):
-    """查询自定义余额：累计发放额度 - 累计消耗。可按任务（task）分别核算。"""
+def query_balance(task=None, as_of=None):
+    """查询自定义余额：累计发放额度 - 累计消耗。
+
+    task  按任务维度核算；as_of 额外给出“截止某日”的额度与余额快照。
+    """
     granted, entries = granted_total()
     # 没有任何额度流水 -> 未配置额度，按不限额处理
     unlimited = entries == 0
@@ -343,6 +460,14 @@ def query_balance(task=None):
     used_month = round(_sum(today[:7] + "-01", today)[6] or 0, 6)
     balance = None if unlimited else round(granted - used_total, 6)
     pct = None if unlimited or granted <= 0 else round(used_total / granted * 100, 4)
+
+    # 截止日快照：额度与消耗都只算该日期（含）之前，即“当时还剩多少额度”
+    granted_as_of, balance_as_of, used_as_of = None, None, None
+    if as_of:
+        granted_as_of, _n = granted_total(as_of)
+        used_as_of = round((_sum(None, as_of)[6] or 0) + extra, 6)
+        if not unlimited:
+            balance_as_of = round(granted_as_of - used_as_of, 6)
     return {
         "object": "balance",
         "balance": balance,                 # 剩余余额（¥），不限额时为 null
@@ -351,6 +476,10 @@ def query_balance(task=None):
         "overdrawn": (balance is not None and balance < 0),
         "granted": granted,                 # 累计发放额度（¥）= 流水合计
         "initial_balance": granted,         # 兼容字段（同 granted）
+        "as_of": as_of or None,             # 截止日期（快照口径），未指定为 null
+        "balance_as_of": balance_as_of,     # 截止日期剩余额度（¥）
+        "granted_as_of": granted_as_of,     # 截止日期累计发放额度（¥）
+        "used_as_of": used_as_of,           # 截止日期累计消耗（¥）
         "ledger_entries": entries,          # 额度流水条数
         "total_used": used_total,           # 累计消耗（¥）
         "used_today": used_today,
@@ -368,6 +497,132 @@ def query_balance(task=None):
         "pricing": PRICING,
         "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
+
+
+# ----------------------------- 会话识别（任务名推导） -----------------------------
+# 客户端注入的上下文块：这些内容在同一工作区的每个会话里几乎相同，
+# 若拿它们做指纹会把不同会话合并成同一个任务，必须先剔除。
+INJECT_TAGS = ("user_info", "environment_details", "additional_data", "system_reminder",
+               "command-name", "command-message", "command-args", "local-command-stdout",
+               "local-command-stderr", "ide_selection", "ide_opened_file", "attachments")
+USER_QUERY_RE = re.compile(r"<user_query>([\s\S]*?)</user_query>", re.I)
+
+
+def _strip_injected(text):
+    """剔除 IDE/客户端注入的上下文块，只留下人写的内容。"""
+    for tag in INJECT_TAGS:
+        text = re.sub(r"<%s[^>]*>[\s\S]*?</%s>" % (tag, tag), " ", text, flags=re.I)
+    # 兜底：其它成对的 XML 风格注入块
+    text = re.sub(r"<[a-z][a-z0-9_-]{3,30}>[\s\S]*?</[a-z][a-z0-9_-]{3,30}>", " ", text, flags=re.I)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _first_message_text(req, limit=TASK_FINGERPRINT_MAX):
+    """取会话的「第一句真实人话」作为指纹素材。
+
+    客户端每轮都会重发完整历史，因此这句在会话内保持不变；优先级：
+      1) 第一条 user 消息里的 <user_query>（CodeBuddy/IDE 把真实提问放这里）；
+      2) 第一条 user 消息去掉注入块后的剩余内容；
+      3) system 首行（仅用于连注入块都没有时的兜底）。
+    """
+    msgs = [m for m in (req.get("messages") or []) if isinstance(m, dict)]
+    users = [m for m in msgs if m.get("role") == "user"]
+    for m in users:                      # 1) 真实提问（最可靠，且跨会话唯一）
+        found = USER_QUERY_RE.search(_msg_text(m.get("content", "")))
+        if found and found.group(1).strip():
+            return re.sub(r"\s+", " ", found.group(1).strip())[:limit]
+    for m in users:                      # 2) 去掉注入块后的正文
+        text = _strip_injected(_msg_text(m.get("content", "")))
+        if text:
+            return text[:limit]
+    for role in ("system", "assistant"):  # 3) 兜底：system 首行
+        for m in msgs:
+            if m.get("role") == role:
+                text = _strip_injected(_msg_text(m.get("content", "")))
+                if text:
+                    return text[:limit]
+    return ""
+
+
+def _fingerprint(text):
+    """首句人话 -> 稳定的短指纹，形如 fp-1a2b3c4d-帮我实现xxx。"""
+    if not text:
+        return ""
+    digest = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:8]
+    flat = re.sub(r"\s+", " ", text).strip()
+    cut = flat[:TASK_FINGERPRINT_PREFIX]
+    sp = cut.rfind(" ")          # 拉丁文尽量断在词边界，避免出现半截单词
+    if sp >= TASK_FINGERPRINT_PREFIX // 2:
+        cut = cut[:sp]
+    cut = cut.strip(" ,.;:、，。-—")
+    return "fp-%s-%s" % (digest, cut) if cut else "fp-%s" % digest
+
+
+def resolve_task(headers, req):
+    """推导任务名与来源：X-Task-Id 头 > 请求体会话字段 > 会话指纹 > default。"""
+    if USE_TASK_HEADER:
+        h = headers.get(TASK_HEADER_NAME) or headers.get(TASK_HEADER_NAME.lower())
+        if h and h.strip():
+            return h.strip()[:120], "header"
+    if USE_TASK_BODY and isinstance(req, dict):
+        model = str(req.get("model") or "")
+        for field in TASK_BODY_FIELDS:
+            cur = req
+            for part in field.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+                if cur in (None, "", [], {}):
+                    cur = None
+                    break
+            if cur is None:
+                continue
+            val = str(cur).strip()
+            if not val:
+                continue
+            if TASK_BODY_SKIP_IF_MODEL and model and val == model:
+                continue  # 客户端把模型名塞在 user 里，不能当任务名
+            return val[:120], "body:" + field
+    if USE_TASK_FINGERPRINT:
+        fp = _fingerprint(_first_message_text(req or {}))
+        if fp:
+            return fp, "fingerprint"
+    return TASK_DEFAULT, "default"
+
+
+_trace_log = collections.deque(maxlen=TRACE_SIZE)   # 最近若干条 chat 请求的诊断信息
+
+
+def _trace(handler, task_id, task_src, model, user_agent, req):
+    """记录一条 chat 请求的会话识别现场，用于确认客户端到底发了什么（GET /api/trace）。
+
+    只保留头名与脱敏后的值，避免泄露 API Key；同时记录 body 顶层字段名与会话字段取值。
+    """
+    hdrs = {}
+    for k, v in handler.headers.items():
+        key = k.lower()
+        if key in TRACE_MASK or key.startswith("x-api-"):
+            hdrs[k] = "***"
+        elif key in ("user-agent", "x-task-id", "x-session-id", "session_id",
+                     "x-conversation-id", "x-thread-id", "x-request-id", "x-app",
+                     "x-client", "referer", "origin"):
+            hdrs[k] = v[:120]
+        else:
+            hdrs[k] = "<%d bytes>" % len(v or "")
+    info = {
+        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        "client": handler.client_address[0] if handler.client_address else "",
+        "task": task_id,
+        "task_src": task_src,
+        "model": model,
+        "user_agent": (user_agent or "")[:120],
+        "body_keys": sorted((req or {}).keys()),
+        "body_user": str((req or {}).get("user", ""))[:120],
+        "metadata": (req or {}).get("metadata"),
+        "first_msg": _first_message_text(req or {})[:60],
+        "headers": hdrs,
+    }
+    _trace_log.append(info)
+    if TRACE_VERBOSE:
+        sys.stderr.write("[trace] %s" % json.dumps(info, ensure_ascii=False) + "\n")
 
 
 # ----------------------------- usage 解析 -----------------------------
@@ -582,10 +837,34 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         f = qs.get("from", [""])[0] or None
         t = qs.get("to", [""])[0] or None
-        if p.startswith("/api/stats"):
-            self._send_json(200, query_stats(f, t))
+        if p.startswith("/api/tasks"):  # 任务清单（搜索框建议）/ 汇总分页
+            kw = qs.get("task_like", [""])[0] or qs.get("kw", [""])[0]
+            if qs.get("page"):        # 按任务汇总的分页查询
+                self._send_json(200, query_tasks_page(
+                    f, t, task_like=kw,
+                    input_like=qs.get("input_like", [""])[0],
+                    page=qs.get("page", ["1"])[0], size=qs.get("size", ["10"])[0]))
+            else:                     # 下拉建议用的清单
+                self._send_json(200, query_tasks(f, t, kw,
+                                                 input_like=qs.get("input_like", [""])[0],
+                                                 limit=_int_arg(qs.get("limit", ["300"])[0], 300)))
+        elif p.startswith("/api/stats"):
+            self._send_json(200, query_stats(f, t, task=_exact_task(qs),
+                                              task_like=qs.get("task_like", [""])[0],
+                                              input_like=qs.get("input_like", [""])[0]))
         elif p.startswith("/api/records"):
-            self._send_json(200, query_records(f, t))
+            if qs.get("page"):        # 分页查询（列表页）
+                self._send_json(200, query_records_page(
+                    f, t, task=_exact_task(qs), task_like=qs.get("task_like", [""])[0],
+                    input_like=qs.get("input_like", [""])[0],
+                    page=qs.get("page", ["1"])[0], size=qs.get("size", ["20"])[0]))
+            else:                     # 兼容旧调用：一次性返回全部
+                self._send_json(200, query_records(f, t, task=_exact_task(qs),
+                                                   task_like=qs.get("task_like", [""])[0],
+                                                   input_like=qs.get("input_like", [""])[0]))
+        elif p.startswith("/api/trace"):  # 会话识别诊断：客户端实际带了哪些标识
+            n = _int_arg(qs.get("limit", ["20"])[0], 20)
+            self._send_json(200, {"trace": list(_trace_log)[-n:], "size": TRACE_SIZE})
         elif p.startswith("/api/balance/log"):  # 额度流水（须在 /api/balance 之前判断）
             self._send_json(200, query_ledger(_int_arg(qs.get("limit", ["50"])[0], 50)))
         elif p.startswith("/api/balance"):
@@ -594,9 +873,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def _balance_api(self, fmt="full"):
-        """余额查询：GET，支持 ?task=xx 指定任务维度；fmt 决定响应格式。"""
+        """余额查询：GET，支持 ?task=xx 按任务核算、?to=YYYY-MM-DD 取截止该日的额度快照。"""
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        b = query_balance(qs.get("task", [""])[0] or None)
+        as_of = qs.get("to", [""])[0] or qs.get("as_of", [""])[0] or None
+        b = query_balance(qs.get("task", [""])[0] or None, as_of=as_of)
         remain = b["balance"]
         if fmt == "openai":  # 兼容 OpenAI 旧版 billing 探测格式
             hard = None if not isinstance(remain, (int, float)) else round(
@@ -689,7 +969,9 @@ class Handler(BaseHTTPRequestHandler):
     def _proxy(self, method):
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else b""
-        task_id = self.headers.get("X-Task-Id", "default")
+        task_id, task_src = TASK_DEFAULT, "default"
+        model = ""
+        req = {}
         is_chat = self.path.split("?")[0].rstrip("/").endswith("/chat/completions")
         input_text = ""
         input_raw = ""
@@ -702,14 +984,17 @@ class Handler(BaseHTTPRequestHandler):
                     req.setdefault("stream_options", {})["include_usage"] = True
                     body = json.dumps(req).encode()
                     is_stream = True
-                if task_id == "default" and req.get("user"):
-                    task_id = str(req["user"])
+                task_id, task_src = resolve_task(self.headers, req)
+                model = str(req.get("model") or "")
                 input_text = extract_input(req)
                 if req.get("messages") is not None:
                     input_raw = json.dumps(req.get("messages"), ensure_ascii=False)
                 has_image = detect_images(req)
             except Exception:
                 pass
+        user_agent = self.headers.get("User-Agent") or ""
+        if is_chat:
+            _trace(self, task_id, task_src, model, user_agent, req)
 
         url = BACKEND + self.path
         # 注意：body 为空时必须传 None，否则 urllib 会把空 body 当作有体请求（给 GET 附加空体）
@@ -828,7 +1113,8 @@ class Handler(BaseHTTPRequestHandler):
                 ct = "".join(content_parts)
                 out = ct if MAX_OUTPUT <= 0 else ct[:MAX_OUTPUT]
                 rsn = rt if MAX_OUTPUT <= 0 else rt[:MAX_OUTPUT]
-                save_usage(task_id, u, input_text, out or "", rsn, input_raw, has_image)
+                save_usage(task_id, u, input_text, out or "", rsn, input_raw, has_image,
+                              model, user_agent, task_src)
             del reason_parts, content_parts, usage_holder, pending
         elif is_chat:
             full = bytes(buf)
@@ -837,7 +1123,8 @@ class Handler(BaseHTTPRequestHandler):
             u = norm_usage(extract_usage(full))
             if u:
                 rt, ct = extract_output_text(full)
-                save_usage(task_id, u, input_text, ct or "", rt, input_raw, has_image)
+                save_usage(task_id, u, input_text, ct or "", rt, input_raw, has_image,
+                              model, user_agent, task_src)
             del full
 
     # ---- 响应工具 ----
@@ -846,6 +1133,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        # 页面常被浏览器缓存，导致改web.html 后仍看到旧界面；这里禁用缓存
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)

@@ -30,18 +30,151 @@
     }
 
     header {
-      padding: 18px 24px;
+      padding: 10px 24px;
       border-bottom: 1px solid var(--line);
       display: flex;
       align-items: center;
-      gap: 14px;
-      flex-wrap: wrap
+      align-content: center;
+      gap: 8px 10px;
+      flex-wrap: wrap;
+      /* 工具栏始终浮于上方：随页面滚动吸顶 */
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      background: var(--bg);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, .35)
     }
 
     header h1 {
       font-size: 18px;
-      margin: 0
+      margin: 0 4px 0 0;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      white-space: nowrap
     }
+
+    /* 统一控件高度与内边距，保证任意宽度下横向基线一致 */
+    header input,
+    header button {
+      height: 30px;
+      padding: 0 12px;
+      font-size: 13px;
+      line-height: 28px;
+      box-sizing: border-box
+    }
+
+    header label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px
+    }
+
+    /* RuoYi 风格查询条件区：左条件、右操作 */
+    .qbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      width: 100%
+    }
+
+    .qrow {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 14px
+    }
+
+    .qactions {
+      margin-left: auto
+    }
+
+    .qgroup {
+      display: inline-flex;
+      gap: 6px
+    }
+
+    .qf {
+      color: var(--mut);
+      font-size: 13px;
+      white-space: nowrap
+    }
+
+    .qf input[type=search] {
+      width: 220px
+    }
+
+    .tilde {
+      color: var(--mut);
+      margin: 0 2px
+    }
+
+    /* 分页条（RuoYi 风格，右下角） */
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+      color: var(--mut);
+      font-size: 13px
+    }
+
+    .pager button {
+      padding: 5px 10px;
+      font-size: 13px;
+      background: var(--card);
+      color: var(--fg);
+      border: 1px solid var(--line)
+    }
+
+    .pager button.on {
+      background: var(--blu);
+      border-color: var(--blu);
+      color: #fff
+    }
+
+    .pager button:disabled {
+      opacity: .45;
+      cursor: not-allowed
+    }
+
+    .pager select,
+    .pager input {
+      background: var(--card);
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 6px;
+      font-size: 13px
+    }
+
+    .pager input {
+      width: 52px;
+      text-align: center
+    }
+
+    header #status {
+      margin-left: auto;   /* 状态文字贴右，不占用控件之间的间隙 */
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 46vw
+    }
+
+    header input[type=text] {
+      width: 150px
+    }
+
+    header input[type=search] {
+      width: 260px
+    }
+
+    
 
     label {
       color: var(--mut);
@@ -61,7 +194,8 @@
     }
 
     input[type=number],
-    input[type=text] {
+    input[type=text],
+    input[type=search] {
       background: var(--card);
       color: var(--fg);
       border: 1px solid var(--line);
@@ -73,25 +207,6 @@
 
     input[type=text] {
       width: 180px
-    }
-
-    .pbar {
-      height: 8px;
-      background: #141a2a;
-      border: 1px solid var(--line);
-      border-radius: 99px;
-      overflow: hidden;
-      margin-top: 10px
-    }
-
-    .pbar>i {
-      display: block;
-      height: 100%;
-      background: linear-gradient(90deg, var(--grn), var(--org))
-    }
-
-    .pbar.low>i {
-      background: linear-gradient(90deg, var(--org), var(--red))
     }
 
     th.op,
@@ -133,10 +248,15 @@
     }
 
     .cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      display: flex;
+      flex-wrap: wrap;
       gap: 14px;
       margin-bottom: 24px
+    }
+
+    .cards .card {
+      flex: 1 1 160px;
+      min-width: 160px
     }
 
     .card {
@@ -155,6 +275,31 @@
       font-size: 22px;
       font-weight: 600;
       margin-top: 6px
+    }
+
+    /* 金额卡同时显示 ¥ / $，字宽较大故自适应缩小并禁止换行 */
+    .card .v.money {
+      font-size: clamp(14px, 1.45vw, 20px);
+      white-space: nowrap
+    }
+
+    .pbar {
+      height: 8px;
+      background: #141a2a;
+      border: 1px solid var(--line);
+      border-radius: 99px;
+      overflow: hidden;
+      margin-top: 10px
+    }
+
+    .pbar>i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--grn), var(--org))
+    }
+
+    .pbar.low>i {
+      background: linear-gradient(90deg, var(--org), var(--red))
     }
 
     .v.grn {
@@ -222,6 +367,44 @@
       background: #141a2a
     }
 
+    /* 表格宽度跟随上方内容自适应：外层可横向滚动，不再撑破布局 */
+    .tblbox {
+      width: 100%;
+      overflow-x: auto
+    }
+
+    /* 任务名 / 时间等文本列自动换行 */
+    th.wrap,
+    td.wrap {
+      white-space: normal;
+      word-break: break-word;
+      line-height: 1.45
+    }
+
+    td.task,
+    th.task {
+      white-space: normal;
+      word-break: break-word;
+      min-width: 140px;
+      max-width: 360px;
+      line-height: 1.45
+    }
+
+    td.time,
+    th.time {
+      white-space: nowrap;   /* 每行不折行：日期一行、时分秒一行 */
+      min-width: 104px;
+      line-height: 1.45
+    }
+
+    td.time>div {
+      white-space: nowrap
+    }
+
+    tr.clickable {
+      cursor: pointer
+    }
+
     tr:hover td {
       background: #1d2538
     }
@@ -242,21 +425,49 @@
       text-decoration: underline
     }
 
-    #modal {
+    /* 列表「输出内容」列内上下分块：深度思考 reasoning / 正文 content */
+    .txt .lbl {
+      font-size: 11px;
+      color: var(--mut);
+      margin: 2px 0 3px
+    }
+
+    .txt .rsn,
+    .txt .cnt {
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-bottom: 6px
+    }
+
+    .txt .rsn {
+      color: #c4b5fd;
+      background: rgba(167, 139, 250, .10);
+      border-left: 3px solid rgba(167, 139, 250, .55)
+    }
+
+    .txt .cnt {
+      color: #5eead4;
+      background: rgba(94, 234, 212, .08);
+      border-left: 3px solid rgba(94, 234, 212, .45)
+    }
+
+    /* 弹窗通用样式（明细弹窗 #modal 与额度管理弹窗 #modalBal 共用） */
+    .modal {
       position: fixed;
       inset: 0;
       background: rgba(0, 0, 0, .6);
       display: none;
       align-items: center;
       justify-content: center;
-      z-index: 50
+      z-index: 60
     }
 
-    #modal.show {
+    .modal.show {
       display: flex
     }
 
-    #modal .box {
+    /* 明细弹窗与额度管理弹窗共用的盒子样式（不透明背景，避免内容透出看不清） */
+    .modal .box {
       background: var(--card);
       border: 1px solid var(--line);
       border-radius: 12px;
@@ -265,10 +476,11 @@
       width: 820px;
       display: flex;
       flex-direction: column;
-      overflow: hidden
+      overflow: hidden;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, .55)
     }
 
-    #modal .bar {
+    .modal .bar {
       display: flex;
       gap: 8px;
       justify-content: flex-end;
@@ -277,13 +489,90 @@
       flex: none
     }
 
-    #modal .bar button {
+    .modal .bar button {
       background: var(--blu);
       color: #fff;
       border: 0;
       border-radius: 8px;
       padding: 6px 14px;
       cursor: pointer
+    }
+
+    /* 额度管理：小弹窗（比明细弹窗更紧凑） */
+    #modalBal .box {
+      width: 580px;
+      max-height: 86vh;
+      background: var(--card)
+    }
+
+    #modalBalBody {
+      padding: 14px 16px 16px;
+      overflow: auto;
+      background: var(--card)
+    }
+
+    #modalBalBody .cards {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin-bottom: 14px
+    }
+
+    #modalBalBody .card {
+      padding: 12px
+    }
+
+    #modalBalBody .card .v {
+      font-size: 15px;
+      white-space: nowrap
+    }
+
+    #modalBalBody .bar2 {
+      flex-wrap: wrap;
+      gap: 8px
+    }
+
+    #modalBalBody label.wide {
+      flex: 1 1 170px;
+      min-width: 0
+    }
+
+#modalBalBody label.wide input {
+      flex: 1;
+      width: auto;
+      min-width: 0
+    }
+
+    .hint {
+      min-height: 20px;
+      font-size: 13px;
+      color: var(--mut);
+      margin: 8px 0 4px
+    }
+
+    .sub {
+      font-size: 13px;
+      color: var(--mut);
+      margin: 6px 0 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px
+    }
+
+    .sub span {
+      color: var(--mut);
+      font-weight: 400
+    }
+
+    .tblwrap {
+      max-height: 40vh;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px
+    }
+
+    .tblwrap table {
+      border-radius: 0
     }
 
     #modalCalc {
@@ -308,12 +597,11 @@
       flex-direction: column;
       gap: 12px;
       padding: 16px;
-      overflow: hidden
+      overflow: auto
     }
 
     .seg {
-      flex: 1;
-      min-height: 0;
+      flex: none;
       display: flex;
       flex-direction: column;
       border: 1px solid var(--line);
@@ -338,9 +626,8 @@
     }
 
     .seg-b {
-      flex: 1;
-      min-height: 0;
-      overflow: auto;
+      flex: none;
+      overflow: visible;
       padding: 12px 14px;
       white-space: pre-wrap;
       word-break: break-word
@@ -443,52 +730,47 @@
 
 <body>
   <header>
-    <h1>Token 用量统计</h1>
-    <label>从 <input type="date" id="from"></label>
-    <label>至 <input type="date" id="to"></label>
-    <button onclick="load()">查询</button>
-    <button onclick="quick('day')">本日</button>
-    <button onclick="quick('week')">本周</button>
-    <button onclick="quick('month')">本月</button>
-    <button onclick="quick('year')">本年</button>
-    <button class="danger" onclick="delRange()">删除本区间</button>
-    <span id="status" style="color:var(--mut)"></span>
+    <div class="qbar">
+      <div class="qrow">
+        <label class="qf">日期范围
+          <input type="date" id="from"><span class="tilde">~</span><input type="date" id="to">
+        </label>
+        <span class="qgroup">
+          <button onclick="quick('day')">本日</button>
+          <button onclick="quick('week')">本周</button>
+          <button onclick="quick('month')">本月</button>
+          <button onclick="quick('year')">本年</button>
+        </span>
+        <button class="danger" onclick="delRange()">删除本区间</button>
+        <label class="qf">任务
+          <input type="search" id="taskKw" list="taskList" placeholder="任务名模糊搜索"
+                 onkeydown="if(event.key==='Enter')load()" autocomplete="off">
+          <datalist id="taskList"></datalist>
+        </label>
+        <label class="qf">内容
+          <input type="search" id="inputKw" placeholder="输入内容模糊搜索"
+                 onkeydown="if(event.key==='Enter')load()" autocomplete="off">
+        </label>
+      </div>
+      <div class="qrow qactions">
+        <button onclick="load()">搜索</button>
+        <button onclick="resetQuery()">重置</button>
+        <button onclick="openBal()" title="打开额度管理">额度管理</button>
+        <span id="status"></span>
+      </div>
+    </div>
   </header>
   <main>
-    <h2 class="bar2">余额<span style="color:var(--mut);font-weight:400">
-        余额 = 累计发放额度 − 累计消耗（额度存于 SQLite，可在下方增减）</span>
-    </h2>
-    <div class="cards" id="balCards"></div>
-    <div class="bar2" style="margin-bottom:22px">
-      <label>金额 ¥ <input type="number" id="balAmt" step="0.01" min="0" value="10"></label>
-      <button onclick="balAdjust(1)">增加余额</button>
-      <button class="danger" onclick="balAdjust(-1)">扣减余额</button>
-      <label>设为总额 ¥ <input type="number" id="balSetVal" step="0.01" min="0" placeholder="如 200"></label>
-      <button onclick="balSetTotal()">设定总额</button>
-      <label>备注 <input type="text" id="balNote" placeholder="可选，记账用"></label>
-      <span id="balMsg" style="color:var(--mut)"></span>
-    </div>
-    <h2 class="bar2">额度流水<span id="balInfo" style="color:var(--mut);font-weight:400"></span>
-    </h2>
-    <table id="ledgerTbl">
-      <thead>
-        <tr>
-          <th>时间</th>
-          <th>类型</th>
-          <th>额度变动 ¥</th>
-          <th>备注</th>
-          <th class="op">操作</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-    <h2>用量统计（按上方日期区间）</h2>
+    <h2>用量统计（按上方日期区间，余额见顶部「额度管理」）</h2>
+    <div class="cards" id="cardsAsOf"></div>
     <div class="cards" id="cards"></div>
     <h2>按任务汇总</h2>
-    <table id="taskTbl">
+    <div class="tblbox">
+      <table id="taskTbl">
       <thead>
         <tr>
-          <th>任务</th>
+          <th class="task">任务</th>
+          <th class="time">最近调用</th>
           <th>调用</th>
           <th>输入token</th>
           <th>命中缓存</th>
@@ -500,16 +782,19 @@
       </thead>
       <tbody></tbody>
     </table>
+    </div>
+    <div class="pager" id="pagerTasks"></div>
     <h2 class="bar2">明细记录
       <button class="danger" onclick="delSelected()">删除选中</button>
       <span id="selInfo" style="color:var(--mut);font-weight:400"></span>
     </h2>
-    <table id="recTbl">
+    <div class="tblbox">
+      <table id="recTbl">
       <thead>
         <tr>
           <th class="chk"><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th>
-          <th>时间</th>
-          <th>任务</th>
+          <th class="time">时间</th>
+          <th class="task">任务</th>
           <th>输入token</th>
           <th>命中缓存</th>
           <th>未命中</th>
@@ -517,14 +802,16 @@
           <th>总计</th>
           <th>金额¥</th>
           <th>输入内容</th>
-          <th>输出内容</th>
+          <th>输出内容（深度思考 / 正文）</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
+    </div>
     <div id="empty" class="empty" style="display:none">该区间暂无记录</div>
+    <div class="pager" id="pager"></div>
   </main>
-  <div id="modal" onclick="if(event.target===this)hideModal()">
+  <div id="modal" class="modal" onclick="if(event.target===this)hideModal()">
     <div class="box">
       <div class="bar">
         <span id="modalTitle" style="margin-right:auto;color:var(--mut);align-self:center"></span>
@@ -533,6 +820,43 @@
       </div>
       <div id="modalCalc"></div>
       <div id="modalText"></div>
+    </div>
+  </div>
+  <!-- 额度管理弹窗：余额卡片 + 增减额度 + 额度流水 -->
+  <div id="modalBal" class="modal" onclick="if(event.target===this)closeBal()">
+    <div class="box">
+      <div class="bar">
+        <span style="margin-right:auto;color:var(--mut);align-self:center">额度管理 · 余额 = 累计发放额度 − 累计消耗</span>
+        <button onclick="loadBalance()">刷新</button>
+        <button onclick="closeBal()">关闭</button>
+      </div>
+      <div id="modalBalBody">
+        <div class="cards" id="balCards"></div>
+        <div class="bar2">
+          <label>金额 ¥ <input type="number" id="balAmt" step="0.01" min="0" value="10"></label>
+          <button onclick="balAdjust(1)">增加</button>
+          <button class="danger" onclick="balAdjust(-1)">扣减</button>
+          <label>设为总额 ¥ <input type="number" id="balSetVal" step="0.01" min="0" placeholder="如 200"></label>
+          <button onclick="balSetTotal()">设定</button>
+          <label class="wide">备注 <input type="text" id="balNote" placeholder="可选，记账用"></label>
+        </div>
+        <div id="balMsg" class="hint"></div>
+        <div class="sub">额度流水<span id="balInfo"></span></div>
+        <div class="tblwrap">
+          <table id="ledgerTbl">
+            <thead>
+              <tr>
+                <th class="time">时间</th>
+                <th>类型</th>
+                <th>额度变动 ¥</th>
+                <th>备注</th>
+                <th class="op">操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
   <script>
@@ -545,6 +869,33 @@
       const f = document.getElementById('from').value || '';
       const t = document.getElementById('to').value || '';
       return 'from=' + encodeURIComponent(f) + '&to=' + encodeURIComponent(t);
+    }
+
+    /* ---------------- 任务筛选：输入框=模糊搜索，点汇总表行=精确匹配 ---------------- */
+    let exactTask = '';   // 非空时按任务名精确匹配（点「按任务汇总」的行）
+
+    function taskQ() {
+      if (exactTask) return '&task=' + encodeURIComponent(exactTask);
+      const kw = (document.getElementById('taskKw').value || '').trim();
+      return kw ? '&task_like=' + encodeURIComponent(kw) : '';
+    }
+
+    function inputQ() {   // 输入内容模糊搜索
+      const kw = (document.getElementById('inputKw').value || '').trim();
+      return kw ? '&input_like=' + encodeURIComponent(kw) : '';
+    }
+
+    function clearTask() {
+      exactTask = '';
+      document.getElementById('taskKw').value = '';
+      document.getElementById('inputKw').value = '';
+      load();
+    }
+
+    function pickTask(name) {   // 点汇总表某一行 -> 精确筛选该任务
+      exactTask = name || '';
+      document.getElementById('taskKw').value = exactTask;
+      load();
     }
 
     function quick(period) {
@@ -578,67 +929,223 @@
       return `${last.getFullYear()}-${pad(last.getMonth() + 1)}-${pad(last.getDate())}`;
     };
     const pad = n => String(n).padStart(2, '0');
+    const fmt2 = t => String(t ? t : '').replace('T', ' ');
+
+    /* 金额双单位格式化（列表与卡片共用） */
+    const both = v => `¥${(+v || 0).toFixed(4)} / $${((+v || 0) / (window.__pricing ? (window.__pricing.rmb_per_usd || 7) : rateUSD || 7)).toFixed(4)}`;
+
+    /* ---------------- 分页（RuoYi 风格：总数/每页条数/页码/跳页） ---------------- */
+    let page = 1, pageSize = 20, pageTotal = 0, pagePages = 1;
+
+    function pagerQS() {
+      return '&page=' + page + '&size=' + pageSize;
+    }
+
+    function renderPager() {
+      const box = document.getElementById('pager');
+      const btn = (label, p, on, dis) =>
+        `<button class="${on ? 'on' : ''}" ${dis ? 'disabled' : ''} onclick="gotoPage(${p})">${label}</button>`;
+      let nums = '';
+      const from = Math.max(1, Math.min(page - 2, pagePages - 4));
+      const to = Math.min(pagePages, Math.max(from + 4, page));
+      for (let i = from; i <= to; i++) nums += btn(i, i, i === page);
+      box.innerHTML =
+        `共 ${pageTotal} 条` +
+        `<select onchange="setPageSize(this.value)">` +
+        [20, 50, 100, 200].map(n => `<option value="${n}" ${n == pageSize ? 'selected' : ''}>${n} 条/页</option>`).join('') +
+        `</select>` +
+        btn('首页', 1, false, page <= 1) +
+        btn('上一页', page - 1, false, page <= 1) +
+        nums +
+        btn('下一页', page + 1, false, page >= pagePages) +
+        btn('末页', pagePages, false, page >= pagePages) +
+        `跳至 <input id="jumpTo" value="${page}" onkeydown="if(event.key==='Enter'){const v=parseInt(this.value);if(v>0)gotoPage(v)}"> 页`;
+    }
+
+    function gotoPage(p) {
+      page = Math.max(1, Math.min(p, pagePages || 1));
+      loadRecords();
+    }
+
+    function setPageSize(v) {
+      pageSize = parseInt(v) || 20;
+      page = 1;
+      loadRecords();
+    }
+
+    function resetQuery() {   // RuoYi「重置」：清空所有查询条件并回到第1 页
+      exactTask = '';
+      document.getElementById('taskKw').value = '';
+      document.getElementById('inputKw').value = '';
+      document.getElementById('from').value = today();
+      document.getElementById('to').value = today();
+      page = 1;
+      tPage = 1;
+      load();
+    }
+
+    async function loadRecords() {   // 仅刷新明细（翻页时用，不重拉统计与余额）
+      const data = await fetch('/api/records?' + rangeQ() + taskQ() + inputQ() + pagerQS()).then(x => x.json());
+      pageTotal = data.total; pagePages = data.pages; page = data.page;
+      renderRecords(data.items || []);
+      renderPager();
+    }
+
+    function renderRecords(r) {   // 渲染明细记录（当前页）
+      window.__rec = r;
+      const rb = document.querySelector('#recTbl tbody');
+      rb.innerHTML = r.map((x, i) => `<tr><td class="chk"><input type="checkbox" class="sel" value="${x.id}"></td>
+    <td class="time" title="${String(x.ts || '').replace('T', ' ')}"><div>${String(x.ts || '').slice(0, 10)}</div><div>${String(x.ts || '').slice(11, 19)}</div></td><td class="task">${esc(x.task)}${x.has_image ? ' 📎' : ''}</td>
+    <td>${fmt(x.prompt)}</td><td>${fmt(x.cached)}</td><td>${fmt(x.uncached)}</td>
+    <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td>
+    <td class="txt clickable" onclick="showFull('input',${i})">${cut(x.input)}</td>
+    <td class="txt clickable" onclick="showFull('output',${i})"><div class="lbl">深度思考 reasoning</div><div class="rsn">${x.reasoning ? cut(x.reasoning) : '（无）'}</div>
+    <div class="lbl">正文 content</div><div class="cnt">${x.output ? cut(x.output) : '（无）'}</div></td></tr>`).join('');
+      document.getElementById('empty').style.display = (r.length ? 'none' : 'block');
+      updateSelInfo();
+    }
+
+    /* ---------------- 按任务汇总：渲染与分页 ---------------- */
+    let tPage = 1, tSize = 10, tTotal = 0, tPages = 1;
+
+    function taskPagerQS() {
+      return '&page=' + tPage + '&size=' + tSize;
+    }
+
+    function renderTaskRows(items) {
+      window.__tasks = items || [];      // 供汇总表行点击时取任务名
+      const tb = document.querySelector('#taskTbl tbody');
+      tb.innerHTML = (items || []).map((x, i) =>
+        `<tr class="clickable" title="点击只看该任务" onclick="pickTask(window.__tasks[${i}].task)"><td class="task">${esc(x.task)}</td><td class="time" title="首次 ${fmt2(x.first_ts)}｜最近 ${fmt2(x.last_ts)}"><div>${String(x.last_ts ? x.last_ts : "").slice(0, 10)}</div><div>${String(x.last_ts ? x.last_ts : "").slice(11, 19)}</div></td><td>${fmt(x.calls)}</td>
+    <td>${fmt(x.prompt)}</td><td>${fmt(x.cached)}</td><td>${fmt(x.uncached)}</td>
+    <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td></tr>`).join('');
+    }
+
+    function renderTaskPager() {
+      const box = document.getElementById('pagerTasks');
+      const btn = (label, p, on, dis) =>
+        `<button class="${on ? 'on' : ''}" ${dis ? 'disabled' : ''} onclick="gotoTaskPage(${p})">${label}</button>`;
+      let nums = '';
+      const from = Math.max(1, Math.min(tPage - 2, tPages - 4));
+      const to = Math.min(tPages, Math.max(from + 4, tPage));
+      for (let i = from; i <= to; i++) nums += btn(i, i, i === tPage);
+      box.innerHTML =
+        `共 ${tTotal} 个任务` +
+        `<select onchange="setTaskPageSize(this.value)">` +
+        [10, 20, 50, 100].map(n => `<option value="${n}" ${n == tSize ? 'selected' : ''}>${n} 条/页</option>`).join('') +
+        `</select>` + btn('首页', 1, false, tPage <= 1) + btn('上一页', tPage - 1, false, tPage <= 1) +
+        nums + btn('下一页', tPage + 1, false, tPage >= tPages) + btn('末页', tPages, false, tPage >= tPages) +
+        `跳至 <input id="jumpTask" value="${tPage}" onkeydown="if(event.key==='Enter'){const v=parseInt(this.value);if(v>0)gotoTaskPage(v)}"> 页`;
+    }
+
+    async function gotoTaskPage(p) {
+      tPage = Math.max(1, Math.min(p, tPages || 1));
+      const d = await fetch('/api/tasks?' + rangeQ() + taskQ() + inputQ() + taskPagerQS()).then(x => x.json());
+      if (d && !Array.isArray(d)) { tPage = d.page; tSize = d.size; tTotal = d.total; tPages = d.pages; }
+      renderTaskRows(d.items || []);
+      renderTaskPager();
+    }
+
+    function setTaskPageSize(v) {
+      tSize = parseInt(v) || 10;
+      tPage = 1;
+      gotoTaskPage(1);
+    }
 
     async function load() {
-      const q = rangeQ();
+      const q = rangeQ() + taskQ() + inputQ();
       document.getElementById('status').textContent = '加载中…';
-      // 用量统计 + 余额/额度流水一并刷新（点“查询”即可看到最新余额）
-      const [s, r, b, log] = await Promise.all([
+      // 用量统计 + 明细（分页）+ 任务清单 + 余额/额度流水 一并刷新
+      const [s, pg, b, log, tlRaw] = await Promise.all([
         fetch('/api/stats?' + q).then(x => x.json()),
-        fetch('/api/records?' + q).then(x => x.json()),
-        fetch('/api/balance').then(x => x.json()),
-        fetch('/api/balance/log?limit=50').then(x => x.json())
+        fetch('/api/records?' + q + pagerQS()).then(x => x.json()),
+        fetch('/api/balance?to=' + encodeURIComponent(document.getElementById('to').value)).then(x => x.json()),
+        fetch('/api/balance/log?limit=50').then(x => x.json()),
+        fetch('/api/tasks?' + q + taskPagerQS()).then(x => x.json())
       ]);
+      pageTotal = pg.total; pagePages = pg.pages; page = pg.page;      // 分页状态
+      const r = pg.items || [];
+      let tl = tlRaw;
+      // 「按任务汇总」分页状态（后端返回分页结构；旧后端返回数组时按单页处理）
+      if (tl && !Array.isArray(tl)) {
+        tPage = tl.page; tSize = tl.size; tTotal = tl.total; tPages = tl.pages;
+        tl = tl.items || [];
+      } else {
+        tPage = 1; tTotal = tl.length; tPages = 1;
+      }
       const t = s.total;
       const rate = (s.pricing && s.pricing.rmb_per_usd) || 7.1;
-      const both = v => `¥${v.toFixed(4)} / $${(v / rate).toFixed(4)}`;
+      rateUSD = rate;                // 供金额卡换算美元
+      const asOf = document.getElementById('to').value || '截止日';
+      const balCls = v => (v === null || v === undefined) ? 'blu' : (v < 0 ? 'red' : 'grn');
+      document.getElementById('cardsAsOf').innerHTML = `
+    <div class="card"><div class="k">截止日期剩余额度 ${asOf}</div><div class="v money ${balCls(b.balance_as_of)}">${amt(b.balance_as_of)}</div></div>
+    <div class="card"><div class="k">截止日期累计发放额度 ${asOf}</div><div class="v money blu">${amt(b.granted_as_of)}</div></div>
+    <div class="card"><div class="k">截止日期累计消耗额度 ${asOf}</div><div class="v money red">${amt(b.used_as_of, '—')}</div></div>`;
       document.getElementById('cards').innerHTML = `
     <div class="card"><div class="k">调用次数</div><div class="v">${fmt(t.calls)}</div></div>
     <div class="card"><div class="k">输入 token</div><div class="v blu">${fmt(t.prompt)}</div></div>
     <div class="card"><div class="k">命中缓存</div><div class="v grn">${fmt(t.cached)}</div></div>
     <div class="card"><div class="k">未命中</div><div class="v red">${fmt(t.uncached)}</div></div>
     <div class="card"><div class="k">输出 token</div><div class="v org">${fmt(t.completion)}</div></div>
-    <div class="card"><div class="k">金额 ¥/$</div><div class="v">${both(t.cost)}</div></div>`;
-      const tb = document.querySelector('#taskTbl tbody');
-      tb.innerHTML = s.tasks.map(x => `<tr><td>${esc(x.task)}</td><td>${fmt(x.calls)}</td>
-    <td>${fmt(x.prompt)}</td><td>${fmt(x.cached)}</td><td>${fmt(x.uncached)}</td>
-    <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td></tr>`).join('');
-      const rb = document.querySelector('#recTbl tbody');
-      window.__rec = r;
+    <div class="card"><div class="k">消耗额度</div><div class="v money">${amt(t.cost)}</div></div>`;
+      renderTaskRows(tl);            // 按任务汇总（当前页）
+      renderTaskPager();
+      const tlList = Array.isArray(s.tasks) ? s.tasks : [];   // 下拉建议用全量任务
+      document.getElementById('taskList').innerHTML = tlList.map(x =>
+        `<option value="${esc(x.task)}">${x.calls} 次 / ${fmt(x.total)} token</option>`).join('');
       window.__pricing = s.pricing;
-      rb.innerHTML = r.map((x, i) => `<tr><td class="chk"><input type="checkbox" class="sel" value="${x.id}"></td>
-    <td>${x.ts.slice(11)}</td><td>${esc(x.task)}${x.has_image ? ' 📎' : ''}</td>
-    <td>${fmt(x.prompt)}</td><td>${fmt(x.cached)}</td><td>${fmt(x.uncached)}</td>
-    <td>${fmt(x.completion)}</td><td>${fmt(x.total)}</td><td>${both(x.cost)}</td>
-    <td class="txt clickable" onclick="showFull('input',${i})">${cut(x.input)}</td>
-    <td class="txt clickable" onclick="showFull('output',${i})">${cut(x.output)}</td></tr>`).join('');
-      renderBalance(b, log);   // 余额卡片 + 额度流水随查询一起刷新
-      document.getElementById('empty').style.display = (r.length ? 'none' : 'block');
-      document.getElementById('status').textContent = '共 ' + r.length + ' 条记录 · 剩余余额 ' + money(b.balance);
-      updateSelInfo();
+      renderRecords(r);
+      renderBalance(b, log);        // 额度摘要（弹窗）+ 额度流水
+      const taskTip = exactTask ? ' · 任务=「' + exactTask + '」(精确)'
+        : ((document.getElementById('taskKw').value || '').trim() ? ' · 任务含「' + document.getElementById('taskKw').value.trim() + '」' : '');
+      const inputKw = (document.getElementById('inputKw').value || '').trim();
+      const inputTip = inputKw ? ' · 内容含「' + inputKw + '」' : '';
+      const filters = (taskTip + inputTip).trim();
+      document.getElementById('status').textContent =
+        filters ? '筛选：' + filters : '';
+      renderPager();
     }
     const cut = s => { s = s || ''; return s.length > 120 ? esc(s.slice(0, 120)) + '…' : esc(s); };
     const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
-    /* ---------------- 余额（额度增减，数据存于 SQLite） ---------------- */
+    /* ---------------- 额度管理弹窗（余额增减，数据存于 SQLite） ---------------- */
     const KIND = { init: '初始额度', topup: '增加', deduct: '扣减', set: '设定总额' };
-    const money = v => (v === null || v === undefined) ? '不限额' : '¥' + (+v).toFixed(4);
-    const postJSON = (path, obj) => fetch(path, {
+    let rateUSD = 7;   // 汇率：1 USD = ? RMB，由 /api/stats 的 pricing 更新
+    const amt = (v, empty) => (v === null || v === undefined) ? (empty || '不限额')
+  : `¥${(+v).toFixed(4)} / $${((+v) / rateUSD).toFixed(4)}`;   // 金额统一显示 ¥ 与 $ 两种单位
+const postJSON = (path, obj) => fetch(path, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj)
     }).then(x => x.json());
 
-    function renderBalance(b, log) {   // 渲染余额卡片 + 额度流水（由 load 与余额操作共用）
+    function openBal() {   // 打开额度管理弹窗（每次打开都拉最新余额与流水）
+      document.getElementById('modalBal').classList.add('show');
+      loadBalance();
+    }
+    function closeBal() { document.getElementById('modalBal').classList.remove('show'); }
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { closeBal(); hideModal(); }
+    });
+
+    async function loadBalance() {
+      const [b, log] = await Promise.all([
+        fetch('/api/balance').then(x => x.json()),
+        fetch('/api/balance/log?limit=50').then(x => x.json())
+      ]);
+      renderBalance(b, log);
+    }
+
+    function renderBalance(b, log) {   // 渲染额度摘要（弹窗内，不再放统计卡片）+ 额度流水
       window.__bal = b;
-      const hasPct = b.used_percent !== null && b.used_percent !== undefined;
-      const pct = hasPct ? Math.max(0, Math.min(100, b.used_percent)) : 0;
       const cls = b.balance === null ? 'blu' : (b.balance < 0 ? 'red' : 'grn');
+      // 弹窗内额度卡片：剩余额度 / 累计发放额度 / 累计消耗 / 已用
+      const pct = b.used_percent === null || b.used_percent === undefined ? null : +b.used_percent;
       document.getElementById('balCards').innerHTML = `
-    <div class="card"><div class="k">剩余余额</div><div class="v ${cls}">${money(b.balance)}</div></div>
-    <div class="card"><div class="k">累计发放额度</div><div class="v blu">${money(b.granted)}</div></div>
-    <div class="card"><div class="k">累计消耗</div><div class="v">${money(b.total_used)}</div></div>
-    <div class="card"><div class="k">今日 / 本月消耗</div><div class="v org">${money(b.used_today)} / ${money(b.used_this_month)}</div></div>
-    <div class="card"><div class="k">额度使用进度</div><div class="v">${hasPct ? (+b.used_percent).toFixed(2) + '%' : '—'}</div>
-      <div class="pbar${hasPct && b.used_percent >= 80 ? ' low' : ''}"><i style="width:${pct}%"></i></div></div>`;
+    <div class="card"><div class="k">剩余额度</div><div class="v ${cls}">${amt(b.balance)}</div></div>
+    <div class="card"><div class="k">累计发放额度</div><div class="v blu">${amt(b.granted)}</div></div>
+    <div class="card"><div class="k">累计消耗</div><div class="v red">${amt(b.total_used)}</div></div>
+    <div class="card"><div class="k">已用</div><div class="v ${pct === null ? 'blu' : (pct >= 80 ? 'red' : 'org')}">${pct === null ? '—' : pct.toFixed(2) + '%'}</div>
+      <div class="pbar${pct !== null && pct >= 80 ? ' low' : ''}"><i style="width:${pct === null ? 0 : Math.max(0, Math.min(100, pct))}%"></i></div></div>`;
       document.getElementById('balInfo').textContent = b.unlimited
         ? '未配置额度（不限额）' : ('共 ' + b.ledger_entries + ' 条流水');
       document.querySelector('#ledgerTbl tbody').innerHTML = (log || []).map(x => `<tr>
@@ -662,7 +1169,7 @@
       const note = document.getElementById('balNote').value.trim();
       const r = await postJSON('/api/balance', { delta: sign * v, note });
       if (r.error) { balMsg(r.detail || r.error, false); return; }
-      balMsg((sign > 0 ? '已增加 ¥' : '已扣减 ¥') + v.toFixed(2) + '，余额 ' + money(r.balance), true);
+      balMsg((sign > 0 ? '已增加 ¥' : '已扣减 ¥') + v.toFixed(2) + '，余额 ' + amt(r.balance), true);
       renderBalance(r, r.ledger || []);
     }
 
@@ -673,7 +1180,7 @@
       const note = document.getElementById('balNote').value.trim();
       const r = await postJSON('/api/balance', { set: v, note });
       if (r.error) { balMsg(r.detail || r.error, false); return; }
-      balMsg('额度已设为 ¥' + v.toFixed(2) + '，余额 ' + money(r.balance), true);
+      balMsg('额度已设为 ¥' + v.toFixed(2) + '，余额 ' + amt(r.balance), true);
       renderBalance(r, r.ledger || []);
     }
 
@@ -681,7 +1188,7 @@
       if (!confirm('确认撤销这条额度流水？余额将按剩余流水重算。')) return;
       const r = await postJSON('/api/balance/delete', { ids: [id] });
       if (r.error) { balMsg(r.detail || r.error, false); return; }
-      balMsg('已撤销 1 条流水，余额 ' + money(r.balance.balance), true);
+      balMsg('已撤销 1 条流水，余额 ' + amt(r.balance.balance), true);
       renderBalance(r.balance, r.ledger);
     }
     function renderMessages(text) {
@@ -716,6 +1223,7 @@
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids })
       }).then(x => x.json());
       document.getElementById('status').textContent = '已删除 ' + res.deleted + ' 条';
+      page = 1; tPage = 1;
       load();   // 重新查询（含余额刷新）
     }
     async function delRange() {
@@ -726,6 +1234,7 @@
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: f, to: t })
       }).then(x => x.json());
       document.getElementById('status').textContent = '已删除 ' + res.deleted + ' 条';
+      page = 1; tPage = 1;
       load();   // 重新查询（含余额刷新）
     }
 
